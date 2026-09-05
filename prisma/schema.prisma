@@ -1,0 +1,39 @@
+// Sauda Jasa — Prisma schema
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Lifecycle of a boutique inside the admin review pipeline.
+enum BoutiqueStatus {
+  DRAFT
+  NEEDS_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A boutique record managed by the internal admin team.
+/// This is the single source of truth behind the dashboard counters.
+model Boutique {
+  id             String         @id @default(uuid())
+  name           String
+  slug           String         @unique
+  description    String?
+  city           String?
+  status         BoutiqueStatus @default(DRAFT)
+  /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
+  telegramQueued Boolean        @default(false) @map("telegram_queued")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([telegramQueued])
+  @@map("boutiques")
+}
