@@ -146,6 +146,16 @@ non-root user.
 
 - **Auth**: `src/features/auth`, `src/lib/supabase/*`, `src/server/auth.ts`, `src/middleware.ts`
 - **Dashboard**: `src/app/(dashboard)/dashboard`, `src/features/dashboard`, `src/services/dashboard.service.ts`
-- **Boutiques**: `src/app/(dashboard)/boutiques`, `src/hooks/use-boutiques.ts`, `src/app/api/boutiques`
+- **Boutiques (full CRUD)**: `src/features/boutiques/*` (form, dialogs, row actions),
+  `src/hooks/use-boutiques.ts` (TanStack Query queries + mutations),
+  `src/services/boutique.service.ts`, and route handlers `src/app/api/boutiques` +
+  `src/app/api/boutiques/[id]` (create / read / update / delete, all auth-protected).
 - **Shell (sidebar + navbar)**: `src/components/layout/*`
 - **Data model**: `prisma/schema.prisma`
+
+### Boutiques CRUD
+
+Admins can create, edit, and delete boutiques from **Boutiques**. Forms use React Hook
+Form + Zod (validated again on the server), writes go through TanStack Query mutations that
+invalidate the list, and feedback is shown with toasts. Deleting asks for confirmation. All
+data is entered by the admin — nothing is seeded.

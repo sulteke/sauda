@@ -13,6 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { BoutiqueRowActions } from "@/features/boutiques/components/boutique-row-actions";
 import { useBoutiques } from "@/hooks/use-boutiques";
 import { useUIStore } from "@/hooks/use-ui-store";
 import type { BoutiqueStatus } from "@/types";
@@ -87,6 +88,7 @@ export function BoutiquesTable() {
             <TableHead>City</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Created</TableHead>
+            <TableHead className="w-[64px] text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -101,6 +103,9 @@ export function BoutiquesTable() {
               </TableCell>
               <TableCell className="text-muted-foreground">
                 {formatDate(boutique.createdAt)}
+              </TableCell>
+              <TableCell className="text-right">
+                <BoutiqueRowActions boutique={boutique} />
               </TableCell>
             </TableRow>
           ))}
