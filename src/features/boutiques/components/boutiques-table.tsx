@@ -17,25 +17,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { BoutiqueRowActions } from "@/features/boutiques/components/boutique-row-actions";
+import { BOUTIQUE_STATUS_LABELS, BOUTIQUE_STATUS_VARIANTS } from "@/features/boutiques/schemas";
 import { useBoutiques } from "@/hooks/use-boutiques";
 import { useUIStore } from "@/hooks/use-ui-store";
-import type { BoutiqueStatus } from "@/types";
 import { formatNumber } from "@/utils/format";
-
-const STATUS_LABEL: Record<BoutiqueStatus, string> = {
-  DRAFT: "Draft",
-  NEEDS_REVIEW: "Needs review",
-  PUBLISHED: "Published",
-  ARCHIVED: "Archived",
-};
-
-const STATUS_VARIANT: Record<BoutiqueStatus, "default" | "secondary" | "outline" | "destructive"> =
-  {
-    DRAFT: "outline",
-    NEEDS_REVIEW: "secondary",
-    PUBLISHED: "default",
-    ARCHIVED: "destructive",
-  };
 
 export function BoutiquesTable() {
   const router = useRouter();
@@ -132,8 +117,8 @@ export function BoutiquesTable() {
               </TableCell>
               <TableCell className="text-muted-foreground">{boutique.city ?? "—"}</TableCell>
               <TableCell>
-                <Badge variant={STATUS_VARIANT[boutique.status]}>
-                  {STATUS_LABEL[boutique.status]}
+                <Badge variant={BOUTIQUE_STATUS_VARIANTS[boutique.status]}>
+                  {BOUTIQUE_STATUS_LABELS[boutique.status]}
                 </Badge>
               </TableCell>
               <TableCell onClick={(event) => event.stopPropagation()}>

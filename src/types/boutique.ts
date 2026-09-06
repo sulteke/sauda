@@ -1,4 +1,11 @@
-export type BoutiqueStatus = "DRAFT" | "NEEDS_REVIEW" | "PUBLISHED" | "ARCHIVED";
+export type BoutiqueStatus =
+  | "DRAFT"
+  | "NEEDS_REVIEW"
+  | "READY_TO_PUBLISH"
+  | "PUBLISHED"
+  | "REJECTED"
+  | "TELEGRAM_FAILED"
+  | "ARCHIVED";
 
 /** A single Instagram post captured during import (snapshot, not re-scraped). */
 export interface BoutiquePost {
@@ -25,6 +32,7 @@ export interface BoutiqueDTO {
   externalUrl: string | null;
   instagramHandle: string | null;
   instagramUrl: string | null;
+  telegramError: string | null;
   posts: BoutiquePost[];
   lastImportedAt: string | null;
   createdAt: string;

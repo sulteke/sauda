@@ -4,7 +4,7 @@ import { Prisma, type Boutique } from "@prisma/client";
 
 import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas";
 import { prisma } from "@/lib/prisma";
-import type { BoutiqueDTO, BoutiquePost } from "@/types";
+import type { BoutiqueDTO, BoutiquePost, BoutiqueStatus } from "@/types";
 import { slugify } from "@/utils/format";
 
 function parsePosts(value: Prisma.JsonValue | null): BoutiquePost[] {
@@ -27,6 +27,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
     instagramUrl: row.instagramUrl,
+    telegramError: row.telegramError,
     posts: parsePosts(row.posts),
     lastImportedAt: lastImportedAt ?? row.createdAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
@@ -41,6 +42,34 @@ export async function listBoutiques(): Promise<BoutiqueDTO[]> {
     return rows.map((row) => toDTO(row));
   } catch (error) {
     console.error("Failed to list boutiques:", error);
+    return [];
+  }
+}
+
+/** Boutiques awaiting a publish decision (imported, not yet approved/rejected). */
+export async function listReviewQueue(): Promise<BoutiqueDTO[]> {
+  try {
+    const rows = await prisma.boutique.findMany({
+      where: { status: { in: ["DRAFT", "NEEDS_REVIEW"] } },
+      orderBy: { createdAt: "desc" },
+    });
+    return rows.map((row) => toDTO(row));
+  } catch (error) {
+    console.error("Failed to list review queue:", error);
+    return [];
+  }
+}
+
+/** Boutiques in any of the given statuses (used by the Telegram board). */
+export async function listBoutiquesByStatus(statuses: BoutiqueStatus[]): Promise<BoutiqueDTO[]> {
+  try {
+    const rows = await prisma.boutique.findMany({
+      where: { status: { in: statuses } },
+      orderBy: { updatedAt: "desc" },
+    });
+    return rows.map((row) => toDTO(row));
+  } catch (error) {
+    console.error("Failed to list boutiques by status:", error);
     return [];
   }
 }

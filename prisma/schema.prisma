@@ -15,7 +15,10 @@ datasource db {
 enum BoutiqueStatus {
   DRAFT
   NEEDS_REVIEW
+  READY_TO_PUBLISH
   PUBLISHED
+  REJECTED
+  TELEGRAM_FAILED
   ARCHIVED
 }
 
@@ -56,6 +59,8 @@ model Boutique {
   posts          Json?
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
   telegramQueued Boolean        @default(false) @map("telegram_queued")
+  /// Failure reason from the last Telegram publish attempt (null on success).
+  telegramError  String?        @map("telegram_error")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 

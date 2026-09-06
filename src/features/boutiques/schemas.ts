@@ -5,15 +5,34 @@ import type { BoutiqueStatus } from "@/types";
 export const BOUTIQUE_STATUSES = [
   "DRAFT",
   "NEEDS_REVIEW",
+  "READY_TO_PUBLISH",
   "PUBLISHED",
+  "REJECTED",
+  "TELEGRAM_FAILED",
   "ARCHIVED",
 ] as const satisfies readonly BoutiqueStatus[];
 
 export const BOUTIQUE_STATUS_LABELS: Record<BoutiqueStatus, string> = {
   DRAFT: "Draft",
   NEEDS_REVIEW: "Needs review",
+  READY_TO_PUBLISH: "Ready to publish",
   PUBLISHED: "Published",
+  REJECTED: "Rejected",
+  TELEGRAM_FAILED: "Telegram failed",
   ARCHIVED: "Archived",
+};
+
+export const BOUTIQUE_STATUS_VARIANTS: Record<
+  BoutiqueStatus,
+  "default" | "secondary" | "outline" | "destructive"
+> = {
+  DRAFT: "outline",
+  NEEDS_REVIEW: "secondary",
+  READY_TO_PUBLISH: "secondary",
+  PUBLISHED: "default",
+  REJECTED: "destructive",
+  TELEGRAM_FAILED: "destructive",
+  ARCHIVED: "outline",
 };
 
 /** Input accepted when creating or editing a boutique. */

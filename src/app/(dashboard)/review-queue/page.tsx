@@ -1,22 +1,25 @@
 import type { Metadata } from "next";
-import { ClipboardCheck } from "lucide-react";
 
-import { EmptyState } from "@/components/shared/empty-state";
 import { PageHeader } from "@/components/shared/page-header";
+import { ReviewQueueTable } from "@/features/review/components/review-queue-table";
+import { listReviewQueue } from "@/services/boutique.service";
+
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Review Queue",
 };
 
-export default function ReviewQueuePage() {
+export default async function ReviewQueuePage() {
+  const items = await listReviewQueue();
+
   return (
     <div className="space-y-6">
-      <PageHeader title="Review Queue" description="Boutiques awaiting admin review." />
-      <EmptyState
-        icon={ClipboardCheck}
-        title="Nothing to review"
-        description="Boutiques marked as Needs Review will appear here."
+      <PageHeader
+        title="Review Queue"
+        description="Approve or reject imported boutiques before publishing."
       />
+      <ReviewQueueTable items={items} />
     </div>
   );
 }
