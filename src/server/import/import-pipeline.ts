@@ -103,7 +103,17 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
 
   const boutique = await prisma.boutique.upsert({
     where: { instagramHandle: preview.instagramHandle },
-    update: {}, // idempotent — do not overwrite an existing boutique on re-import
+    // Re-import refreshes ONLY the imported/enrichment fields. Manually-owned
+    // fields (name, city, status, description) are never overwritten.
+    update: {
+      avatarUrl: preview.avatarUrl,
+      bio: preview.description,
+      category: preview.category,
+      followersCount: preview.followersCount,
+      externalUrl: preview.externalUrl,
+      posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
+      updatedAt: new Date(),
+    },
     create: {
       name: preview.name,
       slug: preview.slug,
