@@ -97,3 +97,25 @@ model ImportJob {
   @@index([boutiqueId])
   @@map("import_jobs")
 }
+
+/// Lifecycle of a queued bulk-import URL.
+enum ImportQueueStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+/// A bulk-import work item: one pasted Instagram URL waiting to be run through
+/// the existing import pipeline. Processed oldest-first by processNextImport().
+model ImportQueue {
+  id           String            @id @default(uuid())
+  instagramUrl String            @map("instagram_url")
+  status       ImportQueueStatus @default(PENDING)
+  error        String?
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("import_queue")
+}

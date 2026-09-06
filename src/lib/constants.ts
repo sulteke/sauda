@@ -2,6 +2,7 @@ import {
   ClipboardCheck,
   DownloadCloud,
   LayoutDashboard,
+  ListChecks,
   Send,
   Settings,
   Store,
@@ -21,6 +22,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { title: "Import", href: "/import", icon: DownloadCloud },
+  { title: "Import Queue", href: "/queue", icon: ListChecks },
   { title: "Boutiques", href: "/boutiques", icon: Store },
   { title: "Review Queue", href: "/review-queue", icon: ClipboardCheck },
   { title: "Telegram", href: "/telegram", icon: Send },
