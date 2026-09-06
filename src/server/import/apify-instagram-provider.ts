@@ -83,6 +83,16 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * Apify's REST API addresses actors as `username~actorName`. The store UI shows
+ * the `username/actorName` (slash) form, and a slash in the path produces an
+ * invalid route (HTTP 404). Normalize the slash form to the tilde form so a
+ * common configuration mistake can't break requests.
+ */
+function normalizeActorId(actorId: string): string {
+  return actorId.replace(/\//g, "~");
+}
+
+/**
  * Production Instagram provider backed by the official Apify REST API. It runs an
  * Instagram scraper actor and normalizes the result into RawInstagramProfile.
  * All Apify knowledge — endpoints, payload shape, parsing — lives here.
@@ -98,7 +108,9 @@ export class ApifyInstagramProvider implements InstagramProvider {
   constructor(options: ApifyInstagramProviderOptions = {}) {
     const envTimeout = Number(process.env.APIFY_TIMEOUT_MS);
     this.token = options.token ?? process.env.APIFY_TOKEN ?? "";
-    this.actorId = options.actorId ?? process.env.APIFY_INSTAGRAM_ACTOR ?? DEFAULT_ACTOR;
+    this.actorId = normalizeActorId(
+      options.actorId ?? process.env.APIFY_INSTAGRAM_ACTOR ?? DEFAULT_ACTOR,
+    );
     this.timeoutMs =
       options.timeoutMs ??
       (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);

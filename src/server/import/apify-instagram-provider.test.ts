@@ -84,6 +84,23 @@ describe("ApifyInstagramProvider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("normalizes a slash actor id to the tilde form in the request URL", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([SAMPLE_ITEM]));
+
+    const provider = new ApifyInstagramProvider({
+      token: "test-token",
+      timeoutMs: 50,
+      baseUrl: "https://api.apify.test",
+      actorId: "apify/instagram-profile-scraper",
+    });
+
+    await provider.fetchProfile(REQUEST);
+
+    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain("/acts/apify~instagram-profile-scraper/");
+    expect(calledUrl).not.toContain("apify/instagram-profile-scraper");
+  });
+
   it("retries once and then succeeds", async () => {
     fetchMock
       .mockRejectedValueOnce(new Error("network glitch"))
