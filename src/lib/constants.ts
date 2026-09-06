@@ -1,5 +1,6 @@
 import {
   ClipboardCheck,
+  DownloadCloud,
   LayoutDashboard,
   Send,
   Settings,
@@ -19,6 +20,7 @@ export interface NavItem {
 /** Primary navigation shown in the sidebar. */
 export const NAV_ITEMS: NavItem[] = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { title: "Import", href: "/import", icon: DownloadCloud },
   { title: "Boutiques", href: "/boutiques", icon: Store },
   { title: "Review Queue", href: "/review-queue", icon: ClipboardCheck },
   { title: "Telegram", href: "/telegram", icon: Send },

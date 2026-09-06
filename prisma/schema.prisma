@@ -19,8 +19,25 @@ enum BoutiqueStatus {
   ARCHIVED
 }
 
-/// A boutique record managed by the internal admin team.
-/// This is the single source of truth behind the dashboard counters.
+/// Where a boutique / import originated. Instagram-only today, but the import
+/// pipeline is source-agnostic so new sources slot in without schema churn.
+enum ImportSource {
+  INSTAGRAM
+}
+
+/// Lifecycle of an import job. Designed to be driven by an async worker at
+/// scale: a worker claims PENDING jobs, moves them PROCESSING, and lands them
+/// in READY_FOR_REVIEW / COMPLETED / FAILED.
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  READY_FOR_REVIEW
+  COMPLETED
+  FAILED
+}
+
+/// A boutique record. Populated by the import pipeline (auto-discovery), not by
+/// manual data entry. `instagramHandle` is the dedup key across re-imports.
 model Boutique {
   id             String         @id @default(uuid())
   name           String
@@ -28,12 +45,49 @@ model Boutique {
   description    String?
   city           String?
   status         BoutiqueStatus @default(DRAFT)
+  instagramHandle String?       @unique @map("instagram_handle")
+  instagramUrl   String?        @map("instagram_url")
+  avatarUrl      String?        @map("avatar_url")
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
   telegramQueued Boolean        @default(false) @map("telegram_queued")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 
+  importJobs ImportJob[]
+
   @@index([status])
   @@index([telegramQueued])
   @@map("boutiques")
+}
+
+/// A single auto-discovery attempt. Durable, auditable, and retryable — the
+/// backbone of import-first onboarding at 100k+ scale.
+model ImportJob {
+  id         String       @id @default(uuid())
+  source     ImportSource @default(INSTAGRAM)
+  /// The raw URL the admin pasted.
+  sourceUrl  String       @map("source_url")
+  /// Extracted profile handle (dedup / lookup key). Nullable until parsed.
+  handle     String?
+  status     ImportStatus @default(PENDING)
+  /// Untouched provider payload — lets us re-map without re-scraping.
+  rawProfile Json?        @map("raw_profile")
+  /// Normalized boutique draft shown in the preview and used to persist.
+  preview    Json?
+  /// Failure reason when status = FAILED.
+  error      String?
+  attempts   Int          @default(0)
+  /// Supabase user id of the admin who ran the import.
+  createdBy  String?      @map("created_by")
+
+  boutiqueId String?   @map("boutique_id")
+  boutique   Boutique? @relation(fields: [boutiqueId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([handle])
+  @@index([boutiqueId])
+  @@map("import_jobs")
 }

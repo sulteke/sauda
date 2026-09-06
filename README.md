@@ -145,6 +145,9 @@ non-root user.
 ## What lives where (quick map)
 
 - **Auth**: `src/features/auth`, `src/lib/supabase/*`, `src/server/auth.ts`, `src/middleware.ts`
+- **Import (import-first onboarding)**: `src/app/(dashboard)/import`, `src/features/import/*`,
+  `src/server/import/*` (provider + pipeline), `src/services/import.service.ts`, and route
+  handlers `src/app/api/import/*`.
 - **Dashboard**: `src/app/(dashboard)/dashboard`, `src/features/dashboard`, `src/services/dashboard.service.ts`
 - **Boutiques (full CRUD)**: `src/features/boutiques/*` (form, dialogs, row actions),
   `src/hooks/use-boutiques.ts` (TanStack Query queries + mutations),
@@ -153,9 +156,23 @@ non-root user.
 - **Shell (sidebar + navbar)**: `src/components/layout/*`
 - **Data model**: `prisma/schema.prisma`
 
-### Boutiques CRUD
+### Import pipeline (import-first)
 
-Admins can create, edit, and delete boutiques from **Boutiques**. Forms use React Hook
-Form + Zod (validated again on the server), writes go through TanStack Query mutations that
-invalidate the list, and feedback is shown with toasts. Deleting asks for confirmation. All
-data is entered by the admin — nothing is seeded.
+The product is **import-first**: the admin never types boutique data. The only manual input
+is an **Instagram profile URL** on the **Import** page; everything else is discovered.
+
+Flow: `paste URL → create ImportJob → provider fetches profile → preview → save boutique → done`.
+
+- **`ImportJob`** (`prisma/schema.prisma`) is a durable, auditable, retryable record with an
+  `ImportStatus` lifecycle (`PENDING → PROCESSING → READY_FOR_REVIEW → COMPLETED / FAILED`).
+  The raw provider payload is stored so profiles can be re-mapped without re-scraping.
+- **`InstagramProvider`** (`src/server/import/provider-types.ts`) is the single seam to any
+  data source. `MockInstagramProvider` runs today; a real scraper swaps in behind
+  `getInstagramProvider()` with no change to the pipeline.
+- **Pipeline** (`src/server/import/import-pipeline.ts`) owns the staged transitions; the
+  **service** (`src/services/import.service.ts`) is the API the routes call. Runs inline now,
+  ready to move onto a queue/worker for 100k+ imports.
+- **Idempotent by handle**: re-importing the same profile links to the existing boutique
+  instead of creating a duplicate.
+
+Not implemented here (by design): real Instagram scraping, AI, Telegram, Review Queue.
