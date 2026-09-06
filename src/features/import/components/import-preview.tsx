@@ -22,6 +22,7 @@ export function ImportPreview({ job, onSave, onReset, isSaving = false }: Import
 
   const isCompleted = job.status === "COMPLETED";
   const initial = preview.name.charAt(0).toUpperCase() || "B";
+  const isMock = process.env.NEXT_PUBLIC_USE_MOCK_PROVIDER !== "false";
 
   return (
     <Card>
@@ -30,7 +31,11 @@ export function ImportPreview({ job, onSave, onReset, isSaving = false }: Import
           <Sparkles className="h-4 w-4 text-muted-foreground" />
           {isCompleted ? "Boutique saved" : "Discovered profile"}
         </CardTitle>
-        <Badge variant="secondary">Mock data</Badge>
+        {isMock ? (
+          <Badge variant="secondary">Mock data</Badge>
+        ) : (
+          <Badge variant="outline">Instagram</Badge>
+        )}
       </CardHeader>
 
       <CardContent className="space-y-5">

@@ -13,3 +13,14 @@ export class ImportStateError extends Error {
     this.name = "ImportStateError";
   }
 }
+
+/** A profile provider (e.g. Apify) failed to return a usable profile. */
+export class InstagramProviderError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, options?: { cause?: unknown; status?: number }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "InstagramProviderError";
+    this.status = options?.status;
+  }
+}
