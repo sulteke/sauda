@@ -1,8 +1,11 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Store } from "lucide-react";
 
 import { EmptyState } from "@/components/shared/empty-state";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -17,7 +20,7 @@ import { BoutiqueRowActions } from "@/features/boutiques/components/boutique-row
 import { useBoutiques } from "@/hooks/use-boutiques";
 import { useUIStore } from "@/hooks/use-ui-store";
 import type { BoutiqueStatus } from "@/types";
-import { formatDate } from "@/utils/format";
+import { formatNumber } from "@/utils/format";
 
 const STATUS_LABEL: Record<BoutiqueStatus, string> = {
   DRAFT: "Draft",
@@ -35,6 +38,7 @@ const STATUS_VARIANT: Record<BoutiqueStatus, "default" | "secondary" | "outline"
   };
 
 export function BoutiquesTable() {
+  const router = useRouter();
   const { data, isLoading, isError } = useBoutiques();
   const searchQuery = useUIStore((state) => state.searchQuery);
 
@@ -63,7 +67,8 @@ export function BoutiquesTable() {
     if (!query) return true;
     return (
       boutique.name.toLowerCase().includes(query) ||
-      (boutique.city ?? "").toLowerCase().includes(query)
+      (boutique.city ?? "").toLowerCase().includes(query) ||
+      (boutique.category ?? "").toLowerCase().includes(query)
     );
   });
 
@@ -73,7 +78,7 @@ export function BoutiquesTable() {
         icon={Store}
         title="No boutiques yet"
         description={
-          query ? "No boutiques match your search." : "Boutiques you add will appear here."
+          query ? "No boutiques match your search." : "Imported boutiques will appear here."
         }
       />
     );
@@ -84,27 +89,54 @@ export function BoutiquesTable() {
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead className="w-12">
+              <span className="sr-only">Avatar</span>
+            </TableHead>
             <TableHead>Name</TableHead>
+            <TableHead>Category</TableHead>
+            <TableHead className="text-right">Followers</TableHead>
             <TableHead>City</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Created</TableHead>
-            <TableHead className="w-[64px] text-right">Actions</TableHead>
+            <TableHead className="w-12">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {boutiques.map((boutique) => (
-            <TableRow key={boutique.id}>
-              <TableCell className="font-medium">{boutique.name}</TableCell>
+            <TableRow
+              key={boutique.id}
+              className="cursor-pointer"
+              onClick={() => router.push(`/boutiques/${boutique.id}`)}
+            >
+              <TableCell>
+                <Avatar className="h-9 w-9">
+                  {boutique.avatarUrl ? (
+                    <AvatarImage src={boutique.avatarUrl} alt={boutique.name} />
+                  ) : null}
+                  <AvatarFallback>{boutique.name.charAt(0).toUpperCase()}</AvatarFallback>
+                </Avatar>
+              </TableCell>
+              <TableCell className="font-medium">
+                <Link
+                  href={`/boutiques/${boutique.id}`}
+                  className="hover:underline"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {boutique.name}
+                </Link>
+              </TableCell>
+              <TableCell className="text-muted-foreground">{boutique.category ?? "—"}</TableCell>
+              <TableCell className="text-right tabular-nums text-muted-foreground">
+                {boutique.followersCount != null ? formatNumber(boutique.followersCount) : "—"}
+              </TableCell>
               <TableCell className="text-muted-foreground">{boutique.city ?? "—"}</TableCell>
               <TableCell>
                 <Badge variant={STATUS_VARIANT[boutique.status]}>
                   {STATUS_LABEL[boutique.status]}
                 </Badge>
               </TableCell>
-              <TableCell className="text-muted-foreground">
-                {formatDate(boutique.createdAt)}
-              </TableCell>
-              <TableCell className="text-right">
+              <TableCell onClick={(event) => event.stopPropagation()}>
                 <BoutiqueRowActions boutique={boutique} />
               </TableCell>
             </TableRow>

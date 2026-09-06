@@ -48,6 +48,12 @@ model Boutique {
   instagramHandle String?       @unique @map("instagram_handle")
   instagramUrl   String?        @map("instagram_url")
   avatarUrl      String?        @map("avatar_url")
+  bio            String?
+  category       String?
+  followersCount Int?           @map("followers_count")
+  externalUrl    String?        @map("external_url")
+  /// First recent Instagram posts captured at import time (array of post objects).
+  posts          Json?
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
   telegramQueued Boolean        @default(false) @map("telegram_queued")
   createdAt      DateTime       @default(now()) @map("created_at")

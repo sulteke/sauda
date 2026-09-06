@@ -42,6 +42,7 @@ interface InstagramPost {
   commentsCount: number | null;
   timestamp: string | null;
   url: string | null;
+  imageUrl: string | null;
 }
 
 interface InstagramHighlight {
@@ -138,6 +139,14 @@ export class ApifyInstagramProvider implements InstagramProvider {
       followersCount: toNumber(profile.followersCount),
       isVerified: Boolean(profile.verified ?? profile.isVerified ?? false),
       category: toString(profile.businessCategoryName) ?? toString(profile.category),
+      recentPosts: recentPosts.slice(0, 6).map((post) => ({
+        imageUrl: post.imageUrl,
+        caption: post.caption,
+        likes: post.likesCount,
+        comments: post.commentsCount,
+        permalink:
+          post.url ?? (post.shortCode ? `https://www.instagram.com/p/${post.shortCode}/` : null),
+      })),
       sourceUrl: request.url,
       fetchedAt: new Date().toISOString(),
       raw: {
@@ -204,6 +213,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
         commentsCount: toNumber(item.commentsCount),
         timestamp: toString(item.timestamp),
         url: toString(item.url),
+        imageUrl: toString(item.displayUrl) ?? toString(item.imageUrl),
       };
     });
   }

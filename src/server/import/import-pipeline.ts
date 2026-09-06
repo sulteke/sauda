@@ -24,6 +24,7 @@ export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePrevi
     isVerified: profile.isVerified,
     category: profile.category,
     city: null,
+    recentPosts: profile.recentPosts.slice(0, 6),
   };
 }
 
@@ -112,6 +113,11 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       instagramHandle: preview.instagramHandle,
       instagramUrl: preview.instagramUrl,
       avatarUrl: preview.avatarUrl,
+      bio: preview.description,
+      category: preview.category,
+      followersCount: preview.followersCount,
+      externalUrl: preview.externalUrl,
+      posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
     },
   });
 

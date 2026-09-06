@@ -1,3 +1,5 @@
+import type { BoutiquePost } from "./boutique";
+
 export type ImportSource = "INSTAGRAM";
 
 export type ImportStatus = "PENDING" | "PROCESSING" | "READY_FOR_REVIEW" | "COMPLETED" | "FAILED";
@@ -15,6 +17,7 @@ export interface BoutiquePreview {
   isVerified: boolean;
   category: string | null;
   city: string | null;
+  recentPosts: BoutiquePost[];
 }
 
 /** Serializable view of an import job returned to the client. */

@@ -4,10 +4,14 @@ import { Prisma, type Boutique } from "@prisma/client";
 
 import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas";
 import { prisma } from "@/lib/prisma";
-import type { BoutiqueDTO } from "@/types";
+import type { BoutiqueDTO, BoutiquePost } from "@/types";
 import { slugify } from "@/utils/format";
 
-function toDTO(row: Boutique): BoutiqueDTO {
+function parsePosts(value: Prisma.JsonValue | null): BoutiquePost[] {
+  return Array.isArray(value) ? (value as unknown as BoutiquePost[]) : [];
+}
+
+function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO {
   return {
     id: row.id,
     name: row.name,
@@ -16,6 +20,15 @@ function toDTO(row: Boutique): BoutiqueDTO {
     city: row.city,
     status: row.status,
     telegramQueued: row.telegramQueued,
+    avatarUrl: row.avatarUrl,
+    bio: row.bio,
+    category: row.category,
+    followersCount: row.followersCount,
+    externalUrl: row.externalUrl,
+    instagramHandle: row.instagramHandle,
+    instagramUrl: row.instagramUrl,
+    posts: parsePosts(row.posts),
+    lastImportedAt: lastImportedAt ?? row.createdAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -25,7 +38,7 @@ function toDTO(row: Boutique): BoutiqueDTO {
 export async function listBoutiques(): Promise<BoutiqueDTO[]> {
   try {
     const rows = await prisma.boutique.findMany({ orderBy: { createdAt: "desc" } });
-    return rows.map(toDTO);
+    return rows.map((row) => toDTO(row));
   } catch (error) {
     console.error("Failed to list boutiques:", error);
     return [];
@@ -33,8 +46,15 @@ export async function listBoutiques(): Promise<BoutiqueDTO[]> {
 }
 
 export async function getBoutiqueById(id: string): Promise<BoutiqueDTO | null> {
-  const row = await prisma.boutique.findUnique({ where: { id } });
-  return row ? toDTO(row) : null;
+  const row = await prisma.boutique.findUnique({
+    where: { id },
+    include: {
+      importJobs: { orderBy: { createdAt: "desc" }, take: 1, select: { createdAt: true } },
+    },
+  });
+  if (!row) return null;
+  const lastImportedAt = row.importJobs[0]?.createdAt.toISOString() ?? null;
+  return toDTO(row, lastImportedAt);
 }
 
 export async function createBoutique(input: BoutiqueInput): Promise<BoutiqueDTO> {
