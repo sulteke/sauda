@@ -124,3 +124,34 @@ model ImportQueue {
   @@index([status])
   @@map("import_queue")
 }
+
+/// What a discovery run was seeded from.
+enum DiscoverySeedType {
+  PROFILE
+  HASHTAG
+}
+
+/// Lifecycle of a discovered candidate account.
+enum DiscoveryCandidateStatus {
+  NEW
+  QUEUED
+  DISMISSED
+}
+
+/// A candidate boutique account found by discovery. NOT imported — the admin
+/// reviews these and sends the good ones into the existing import queue.
+model DiscoveryCandidate {
+  id           String                   @id @default(uuid())
+  handle       String
+  instagramUrl String                   @map("instagram_url")
+  seedType     DiscoverySeedType        @map("seed_type")
+  seedValue    String                   @map("seed_value")
+  source       String?
+  status       DiscoveryCandidateStatus @default(NEW)
+  createdAt    DateTime                 @default(now()) @map("created_at")
+  updatedAt    DateTime                 @updatedAt @map("updated_at")
+
+  @@unique([handle, seedValue])
+  @@index([status])
+  @@map("discovery_candidates")
+}
