@@ -57,6 +57,22 @@ model Boutique {
   externalUrl    String?        @map("external_url")
   /// First recent Instagram posts captured at import time (array of post objects).
   posts          Json?
+  /// Whether the source Instagram account is verified.
+  isVerified        Boolean? @map("is_verified")
+  /// Whether the source account is an Instagram business/professional account.
+  isBusinessAccount Boolean? @map("is_business_account")
+  /// Whether the source account is private.
+  isPrivate         Boolean? @map("is_private")
+  /// Total posts on the source account (not the number captured here).
+  postsCount        Int?     @map("posts_count")
+  /// Number of accounts the source account follows.
+  followsCount      Int?     @map("follows_count")
+  /// Physical business address, when the account publishes one (object).
+  businessAddress   Json?    @map("business_address")
+  /// All labeled external links on the profile (array of {title, url}).
+  externalUrls      Json?    @map("external_urls")
+  /// Related/suggested profiles surfaced with the profile (array).
+  relatedProfiles   Json?    @map("related_profiles")
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
   telegramQueued Boolean        @default(false) @map("telegram_queued")
   /// Failure reason from the last Telegram publish attempt (null on success).

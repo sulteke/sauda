@@ -2,18 +2,20 @@ import "server-only";
 
 import type { Boutique, Prisma } from "@prisma/client";
 
+import {
+  parseBusinessAddress,
+  parseExternalLinks,
+  parsePosts,
+  parseRelatedProfiles,
+} from "@/lib/boutique-json";
 import { prisma } from "@/lib/prisma";
-import type { BoutiqueDTO, BoutiquePost } from "@/types";
+import type { BoutiqueDTO } from "@/types";
 import { slugify } from "@/utils/format";
 
 // A boutique is public once the admin has approved it in the review pipeline.
 const PUBLIC_WHERE: Prisma.BoutiqueWhereInput = {
   status: { in: ["READY_TO_PUBLISH", "PUBLISHED"] },
 };
-
-function parsePosts(value: Prisma.JsonValue | null): BoutiquePost[] {
-  return Array.isArray(value) ? (value as unknown as BoutiquePost[]) : [];
-}
 
 /** Public-facing view of a boutique (dates as ISO strings). Read-only. */
 function toPublicDTO(row: Boutique): BoutiqueDTO {
@@ -34,6 +36,14 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     instagramUrl: row.instagramUrl,
     telegramError: row.telegramError,
     posts: parsePosts(row.posts),
+    isVerified: row.isVerified,
+    isBusinessAccount: row.isBusinessAccount,
+    isPrivate: row.isPrivate,
+    postsCount: row.postsCount,
+    followsCount: row.followsCount,
+    businessAddress: parseBusinessAddress(row.businessAddress),
+    externalUrls: parseExternalLinks(row.externalUrls),
+    relatedProfiles: parseRelatedProfiles(row.relatedProfiles),
     lastImportedAt: row.createdAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

@@ -3,13 +3,15 @@ import "server-only";
 import { Prisma, type Boutique } from "@prisma/client";
 
 import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas";
+import {
+  parseBusinessAddress,
+  parseExternalLinks,
+  parsePosts,
+  parseRelatedProfiles,
+} from "@/lib/boutique-json";
 import { prisma } from "@/lib/prisma";
-import type { BoutiqueDTO, BoutiquePost, BoutiqueStatus } from "@/types";
+import type { BoutiqueDTO, BoutiqueStatus } from "@/types";
 import { slugify } from "@/utils/format";
-
-function parsePosts(value: Prisma.JsonValue | null): BoutiquePost[] {
-  return Array.isArray(value) ? (value as unknown as BoutiquePost[]) : [];
-}
 
 function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO {
   return {
@@ -29,6 +31,14 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     instagramUrl: row.instagramUrl,
     telegramError: row.telegramError,
     posts: parsePosts(row.posts),
+    isVerified: row.isVerified,
+    isBusinessAccount: row.isBusinessAccount,
+    isPrivate: row.isPrivate,
+    postsCount: row.postsCount,
+    followsCount: row.followsCount,
+    businessAddress: parseBusinessAddress(row.businessAddress),
+    externalUrls: parseExternalLinks(row.externalUrls),
+    relatedProfiles: parseRelatedProfiles(row.relatedProfiles),
     lastImportedAt: lastImportedAt ?? row.createdAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

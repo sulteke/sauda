@@ -1,3 +1,12 @@
+import type {
+  InstagramBusinessAddress,
+  InstagramExternalLink,
+  InstagramPostChild,
+  InstagramPostDimensions,
+  InstagramPostMusic,
+  InstagramRelatedProfile,
+} from "@/types/instagram";
+
 /**
  * Source-agnostic shape of a discovered Instagram profile. Every provider —
  * mock today, a real scraper tomorrow — returns this exact shape, so the import
@@ -9,6 +18,20 @@ export interface RawInstagramPost {
   likes: number | null;
   comments: number | null;
   permalink: string | null;
+  /** Media/post type, e.g. "Image", "Video", "Sidecar". */
+  type: string | null;
+  videoUrl: string | null;
+  hashtags: string[];
+  mentions: string[];
+  /** Usernames tagged in the post. */
+  taggedUsers: string[];
+  locationName: string | null;
+  locationId: string | null;
+  /** Carousel children (empty for single-media posts). */
+  childPosts: InstagramPostChild[];
+  musicInfo: InstagramPostMusic | null;
+  dimensions: InstagramPostDimensions | null;
+  isPinned: boolean;
 }
 
 export interface RawInstagramProfile {
@@ -22,6 +45,14 @@ export interface RawInstagramProfile {
   category: string | null;
   /** First recent posts captured at import time (already normalized). */
   recentPosts: RawInstagramPost[];
+  // Richer profile metadata surfaced by the scraper.
+  postsCount: number | null;
+  followsCount: number | null;
+  isBusinessAccount: boolean;
+  isPrivate: boolean;
+  businessAddress: InstagramBusinessAddress | null;
+  externalUrls: InstagramExternalLink[];
+  relatedProfiles: InstagramRelatedProfile[];
   sourceUrl: string;
   fetchedAt: string;
   /** Untouched provider payload, stored for re-mapping without re-scraping. */

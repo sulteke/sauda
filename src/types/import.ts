@@ -1,4 +1,9 @@
 import type { BoutiquePost } from "./boutique";
+import type {
+  InstagramBusinessAddress,
+  InstagramExternalLink,
+  InstagramRelatedProfile,
+} from "./instagram";
 
 export type ImportSource = "INSTAGRAM";
 
@@ -18,6 +23,14 @@ export interface BoutiquePreview {
   category: string | null;
   city: string | null;
   recentPosts: BoutiquePost[];
+  // Richer profile metadata (optional: older preview payloads predate these).
+  isBusinessAccount?: boolean;
+  isPrivate?: boolean;
+  postsCount?: number | null;
+  followsCount?: number | null;
+  businessAddress?: InstagramBusinessAddress | null;
+  externalUrls?: InstagramExternalLink[];
+  relatedProfiles?: InstagramRelatedProfile[];
 }
 
 /** Serializable view of an import job returned to the client. */

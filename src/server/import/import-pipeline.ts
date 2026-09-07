@@ -25,7 +25,21 @@ export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePrevi
     category: profile.category,
     city: null,
     recentPosts: profile.recentPosts.slice(0, 6),
+    isBusinessAccount: profile.isBusinessAccount,
+    isPrivate: profile.isPrivate,
+    postsCount: profile.postsCount,
+    followsCount: profile.followsCount,
+    businessAddress: profile.businessAddress,
+    externalUrls: profile.externalUrls,
+    relatedProfiles: profile.relatedProfiles,
   };
+}
+
+/** Coerces an optional value into a Prisma Json input, mapping absent → SQL NULL. */
+function jsonOrDbNull(
+  value: unknown,
+): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  return value == null ? Prisma.DbNull : (value as Prisma.InputJsonValue);
 }
 
 export function toImportJobDTO(job: ImportJob): ImportJobDTO {
@@ -112,6 +126,14 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
+      isVerified: preview.isVerified,
+      isBusinessAccount: preview.isBusinessAccount ?? null,
+      isPrivate: preview.isPrivate ?? null,
+      postsCount: preview.postsCount ?? null,
+      followsCount: preview.followsCount ?? null,
+      businessAddress: jsonOrDbNull(preview.businessAddress),
+      externalUrls: (preview.externalUrls ?? []) as unknown as Prisma.InputJsonValue,
+      relatedProfiles: (preview.relatedProfiles ?? []) as unknown as Prisma.InputJsonValue,
       updatedAt: new Date(),
     },
     create: {
@@ -128,6 +150,14 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
+      isVerified: preview.isVerified,
+      isBusinessAccount: preview.isBusinessAccount ?? null,
+      isPrivate: preview.isPrivate ?? null,
+      postsCount: preview.postsCount ?? null,
+      followsCount: preview.followsCount ?? null,
+      businessAddress: jsonOrDbNull(preview.businessAddress),
+      externalUrls: (preview.externalUrls ?? []) as unknown as Prisma.InputJsonValue,
+      relatedProfiles: (preview.relatedProfiles ?? []) as unknown as Prisma.InputJsonValue,
     },
   });
 

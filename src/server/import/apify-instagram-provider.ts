@@ -1,11 +1,20 @@
 import "server-only";
 
 import { logger } from "@/lib/logger";
+import type {
+  InstagramBusinessAddress,
+  InstagramExternalLink,
+  InstagramPostChild,
+  InstagramPostDimensions,
+  InstagramPostMusic,
+  InstagramRelatedProfile,
+} from "@/types/instagram";
 
 import { InstagramProviderError } from "./errors";
 import type {
   InstagramProfileRequest,
   InstagramProvider,
+  RawInstagramPost,
   RawInstagramProfile,
 } from "./provider-types";
 
@@ -19,13 +28,21 @@ interface ApifyProfileItem {
   fullName?: string | null;
   biography?: string | null;
   followersCount?: number | null;
+  followsCount?: number | null;
+  postsCount?: number | null;
   profilePicUrl?: string | null;
   profilePicUrlHD?: string | null;
   externalUrl?: string | null;
+  externalUrls?: unknown;
   verified?: boolean;
   isVerified?: boolean;
+  isBusinessAccount?: boolean;
+  private?: boolean;
+  isPrivate?: boolean;
   businessCategoryName?: string | null;
   category?: string | null;
+  businessAddress?: unknown;
+  relatedProfiles?: unknown;
   latestPosts?: unknown;
   posts?: unknown;
   highlightReels?: unknown;
@@ -45,6 +62,17 @@ interface InstagramPost {
   timestamp: string | null;
   url: string | null;
   imageUrl: string | null;
+  type: string | null;
+  videoUrl: string | null;
+  hashtags: string[];
+  mentions: string[];
+  taggedUsers: string[];
+  locationName: string | null;
+  locationId: string | null;
+  childPosts: InstagramPostChild[];
+  musicInfo: InstagramPostMusic | null;
+  dimensions: InstagramPostDimensions | null;
+  isPinned: boolean;
 }
 
 interface InstagramHighlight {
@@ -71,6 +99,62 @@ function toString(value: unknown): string | null {
 
 function toNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Non-empty strings from a raw array (drops null/empty). Used for hashtags/mentions. */
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => toString(entry)).filter((entry): entry is string => entry !== null);
+}
+
+/** Extracts tagged usernames from Apify's `taggedUsers` (array of user objects). */
+function toUsernameArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => toString((entry as Record<string, unknown> | null)?.username))
+    .filter((entry): entry is string => entry !== null);
+}
+
+/** Maps Apify's snake_case `businessAddress` object to our shape (null if absent). */
+function toBusinessAddress(value: unknown): InstagramBusinessAddress | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const address: InstagramBusinessAddress = {
+    cityName: toString(item.city_name),
+    streetAddress: toString(item.street_address),
+    zipCode: toString(item.zip_code),
+    latitude: toNumber(item.latitude),
+    longitude: toNumber(item.longitude),
+  };
+  // Only return an address if at least one field carried data.
+  return Object.values(address).some((v) => v !== null) ? address : null;
+}
+
+/** Maps Apify's `externalUrls` (labeled links) to our shape, dropping urlless entries. */
+function toExternalLinks(value: unknown): InstagramExternalLink[] {
+  if (!Array.isArray(value)) return [];
+  return value.reduce<InstagramExternalLink[]>((acc, entry) => {
+    const url = toString((entry as Record<string, unknown> | null)?.url);
+    if (url) acc.push({ title: toString((entry as Record<string, unknown>).title), url });
+    return acc;
+  }, []);
+}
+
+/** Maps Apify's `relatedProfiles` (snake_case) to our shape, dropping unnamed entries. */
+function toRelatedProfiles(value: unknown): InstagramRelatedProfile[] {
+  if (!Array.isArray(value)) return [];
+  return value.reduce<InstagramRelatedProfile[]>((acc, entry) => {
+    const item = (entry ?? {}) as Record<string, unknown>;
+    const username = toString(item.username);
+    if (!username) return acc;
+    acc.push({
+      username,
+      fullName: toString(item.full_name),
+      isVerified: Boolean(item.is_verified ?? false),
+      profilePicUrl: toString(item.profile_pic_url),
+    });
+    return acc;
+  }, []);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -141,14 +225,34 @@ export class ApifyInstagramProvider implements InstagramProvider {
       followersCount: toNumber(profile.followersCount),
       isVerified: Boolean(profile.verified ?? profile.isVerified ?? false),
       category: toString(profile.businessCategoryName) ?? toString(profile.category),
-      recentPosts: recentPosts.slice(0, 6).map((post) => ({
-        imageUrl: post.imageUrl,
-        caption: post.caption,
-        likes: post.likesCount,
-        comments: post.commentsCount,
-        permalink:
-          post.url ?? (post.shortCode ? `https://www.instagram.com/p/${post.shortCode}/` : null),
-      })),
+      recentPosts: recentPosts.slice(0, 6).map(
+        (post): RawInstagramPost => ({
+          imageUrl: post.imageUrl,
+          caption: post.caption,
+          likes: post.likesCount,
+          comments: post.commentsCount,
+          permalink:
+            post.url ?? (post.shortCode ? `https://www.instagram.com/p/${post.shortCode}/` : null),
+          type: post.type,
+          videoUrl: post.videoUrl,
+          hashtags: post.hashtags,
+          mentions: post.mentions,
+          taggedUsers: post.taggedUsers,
+          locationName: post.locationName,
+          locationId: post.locationId,
+          childPosts: post.childPosts,
+          musicInfo: post.musicInfo,
+          dimensions: post.dimensions,
+          isPinned: post.isPinned,
+        }),
+      ),
+      postsCount: toNumber(profile.postsCount),
+      followsCount: toNumber(profile.followsCount),
+      isBusinessAccount: Boolean(profile.isBusinessAccount ?? false),
+      isPrivate: Boolean(profile.private ?? profile.isPrivate ?? false),
+      businessAddress: toBusinessAddress(profile.businessAddress),
+      externalUrls: toExternalLinks(profile.externalUrls),
+      relatedProfiles: toRelatedProfiles(profile.relatedProfiles),
       sourceUrl: request.url,
       fetchedAt: new Date().toISOString(),
       raw: {
@@ -213,6 +317,10 @@ export class ApifyInstagramProvider implements InstagramProvider {
 
     return source.map((entry) => {
       const item = (entry ?? {}) as Record<string, unknown>;
+      const width = toNumber(item.dimensionsWidth);
+      const height = toNumber(item.dimensionsHeight);
+      const music = (item.musicInfo ?? null) as Record<string, unknown> | null;
+      const childSource = Array.isArray(item.childPosts) ? item.childPosts : [];
       return {
         id: toString(item.id),
         shortCode: toString(item.shortCode),
@@ -222,6 +330,26 @@ export class ApifyInstagramProvider implements InstagramProvider {
         timestamp: toString(item.timestamp),
         url: toString(item.url),
         imageUrl: toString(item.displayUrl) ?? toString(item.imageUrl),
+        type: toString(item.type),
+        videoUrl: toString(item.videoUrl),
+        hashtags: toStringArray(item.hashtags),
+        mentions: toStringArray(item.mentions),
+        taggedUsers: toUsernameArray(item.taggedUsers),
+        locationName: toString(item.locationName),
+        locationId: toString(item.locationId),
+        childPosts: childSource.map((child): InstagramPostChild => {
+          const c = (child ?? {}) as Record<string, unknown>;
+          return {
+            type: toString(c.type),
+            imageUrl: toString(c.displayUrl) ?? toString(c.imageUrl),
+            videoUrl: toString(c.videoUrl),
+          };
+        }),
+        musicInfo: music
+          ? { artistName: toString(music.artist_name), songName: toString(music.song_name) }
+          : null,
+        dimensions: width !== null || height !== null ? { width, height } : null,
+        isPinned: Boolean(item.isPinned ?? false),
       };
     });
   }
