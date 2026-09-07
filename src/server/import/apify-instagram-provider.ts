@@ -31,6 +31,8 @@ interface ApifyProfileItem {
   highlightReels?: unknown;
   highlights?: unknown;
   error?: string;
+  isRestrictedProfile?: boolean;
+  restrictionReason?: string | null;
   [key: string]: unknown;
 }
 
@@ -155,6 +157,8 @@ export class ApifyInstagramProvider implements InstagramProvider {
         highlights,
         recentPosts,
         postsCount: recentPosts.length,
+        isRestrictedProfile: Boolean(profile.isRestrictedProfile ?? false),
+        restrictionReason: toString(profile.restrictionReason),
       },
     };
   }
@@ -164,7 +168,11 @@ export class ApifyInstagramProvider implements InstagramProvider {
     const items = await this.requestDatasetItems(handle);
     const profile = items[0];
 
-    if (!profile || profile.error || !toString(profile.username)) {
+    // A missing username means Apify returned no real profile. A populated
+    // profile that also carries an informational `error` (e.g. an age- or
+    // region-restricted account) is still a real profile — import it and keep
+    // the restriction flags in the raw payload rather than rejecting it.
+    if (!profile || !toString(profile.username)) {
       throw new InstagramProviderError(`No Instagram profile found for @${handle}.`);
     }
 
