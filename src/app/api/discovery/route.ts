@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getCurrentUser } from "@/server/auth";
-import { DiscoveryValidationError } from "@/server/discovery/errors";
+import {
+  DiscoveryNotFoundError,
+  DiscoveryPrivateAccountError,
+  DiscoveryProviderError,
+  DiscoveryValidationError,
+} from "@/server/discovery/errors";
 import { listCandidates, runDiscovery } from "@/services/discovery.service";
 
 export const dynamic = "force-dynamic";
@@ -46,8 +51,17 @@ export async function POST(request: Request) {
     const result = await runDiscovery(parsed.data.seed);
     return NextResponse.json({ data: result }, { status: 201 });
   } catch (error) {
-    if (error instanceof DiscoveryValidationError) {
+    if (
+      error instanceof DiscoveryValidationError ||
+      error instanceof DiscoveryPrivateAccountError
+    ) {
       return NextResponse.json({ error: error.message }, { status: 422 });
+    }
+    if (error instanceof DiscoveryNotFoundError) {
+      return NextResponse.json({ error: error.message }, { status: 404 });
+    }
+    if (error instanceof DiscoveryProviderError) {
+      return NextResponse.json({ error: error.message }, { status: 502 });
     }
     console.error("Discovery failed:", error);
     return NextResponse.json({ error: "Discovery failed" }, { status: 500 });
