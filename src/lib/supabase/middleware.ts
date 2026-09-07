@@ -1,11 +1,13 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-/** Routes reachable without an authenticated session. */
-const PUBLIC_ROUTES = ["/login"];
+/** Public routes reachable without an authenticated session (the marketplace + login). */
+const PUBLIC_EXACT = new Set(["/", "/login", "/robots.txt", "/sitemap.xml"]);
+const PUBLIC_PREFIXES = ["/search", "/categories", "/boutique"];
 
 function isPublicRoute(pathname: string): boolean {
-  return PUBLIC_ROUTES.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+  if (PUBLIC_EXACT.has(pathname)) return true;
+  return PUBLIC_PREFIXES.some((route) => pathname === route || pathname.startsWith(`${route}/`));
 }
 
 /**
@@ -48,7 +50,7 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (user && isPublicRoute(pathname)) {
+  if (user && pathname === "/login") {
     const url = request.nextUrl.clone();
     url.pathname = "/dashboard";
     return NextResponse.redirect(url);
