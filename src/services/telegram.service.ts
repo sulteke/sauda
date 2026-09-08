@@ -1,5 +1,6 @@
 import "server-only";
 
+import { categoryLabel } from "@/lib/category-engine";
 import { prisma } from "@/lib/prisma";
 import type { BoutiquePost } from "@/types";
 import { formatNumber } from "@/utils/format";
@@ -8,15 +9,31 @@ const TELEGRAM_API = "https://api.telegram.org";
 const REQUEST_TIMEOUT_MS = 20_000;
 const CAPTION_LIMIT = 1024; // Telegram media-caption max length.
 const MAX_MEDIA = 10; // Telegram sendMediaGroup max items.
+const MAX_HASHTAGS = 5; // Show only the top 3–5 categories.
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * Turns a category label into a Cyrillic-safe Telegram hashtag: splits on spaces
+ * and punctuation, capitalizes each word, concatenates, and prefixes "#".
+ * E.g. "Худи" → "#Худи", "Головной убор" → "#ГоловнойУбор".
+ */
+export function toHashtag(label: string): string {
+  const body = label
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join("");
+  return body ? `#${body}` : "";
+}
+
 /** Shape needed to build a Telegram post — sourced entirely from stored data. */
 interface PublishableBoutique {
   name: string;
-  category: string | null;
+  /** Final detected category labels, highest-scoring first. */
+  categories: string[];
   followersCount: number | null;
   bio: string | null;
   instagramUrl: string | null;
@@ -29,7 +46,6 @@ function buildCaption(boutique: PublishableBoutique): string {
   const lines: string[] = [`<b>${escapeHtml(boutique.name)}</b>`];
 
   const meta: string[] = [];
-  if (boutique.category) meta.push(escapeHtml(boutique.category));
   if (boutique.followersCount != null)
     meta.push(`${formatNumber(boutique.followersCount)} followers`);
   if (meta.length > 0) lines.push(meta.join(" · "));
@@ -40,6 +56,10 @@ function buildCaption(boutique: PublishableBoutique): string {
   if (boutique.instagramUrl) links.push(`📷 ${escapeHtml(boutique.instagramUrl)}`);
   if (boutique.externalUrl) links.push(`🌐 ${escapeHtml(boutique.externalUrl)}`);
   if (links.length > 0) lines.push(`\n${links.join("\n")}`);
+
+  // Categories as hashtags — near the bottom, after the boutique information.
+  const hashtags = boutique.categories.slice(0, MAX_HASHTAGS).map(toHashtag).filter(Boolean);
+  if (hashtags.length > 0) lines.push(`\n🏷 Категориялар\n${hashtags.join(" ")}`);
 
   const caption = lines.join("\n");
   return caption.length > CAPTION_LIMIT ? `${caption.slice(0, CAPTION_LIMIT - 1)}…` : caption;
@@ -147,12 +167,17 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
   }
 
   const posts = Array.isArray(next.posts) ? (next.posts as unknown as BoutiquePost[]) : [];
+  // Final detected categories (auto + manual corrections), highest-scoring first.
+  // productCategories is stored in merge order; resolve ids → labels preserving it.
+  const categories = next.productCategories
+    .map((id) => categoryLabel(id))
+    .filter((label): label is string => label !== null);
 
   try {
     const publisher = getTelegramPublisher();
     await publisher.publish({
       name: next.name,
-      category: next.category,
+      categories,
       followersCount: next.followersCount,
       bio: next.bio,
       instagramUrl: next.instagramUrl,
