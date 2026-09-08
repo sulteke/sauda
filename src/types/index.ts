@@ -6,6 +6,7 @@ export type {
   ProductCategory,
 } from "./category";
 export type { DashboardStats } from "./dashboard";
+export type { BoutiqueEnrichment } from "./enrichment";
 export type {
   InstagramBusinessAddress,
   InstagramExternalLink,

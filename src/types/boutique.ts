@@ -1,4 +1,5 @@
 import type { DetectedCategory, ProductCategory } from "./category";
+import type { BoutiqueEnrichment } from "./enrichment";
 import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
@@ -62,6 +63,8 @@ export interface BoutiqueDTO {
   manualCategoriesAdded: ProductCategory[];
   /** Categories an admin removed by hand (Stage 3). */
   manualCategoriesRemoved: ProductCategory[];
+  /** Structured business info derived from the imported data. */
+  enrichment: BoutiqueEnrichment;
   followersCount: number | null;
   externalUrl: string | null;
   instagramHandle: string | null;

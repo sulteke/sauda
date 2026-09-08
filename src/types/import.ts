@@ -1,5 +1,6 @@
 import type { BoutiquePost } from "./boutique";
 import type { DetectedCategory, ProductCategory } from "./category";
+import type { BoutiqueEnrichment } from "./enrichment";
 import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
@@ -27,6 +28,8 @@ export interface BoutiquePreview {
   productCategories?: ProductCategory[];
   /** Full scored detection breakdown with match evidence (absent on legacy previews). */
   categoryScores?: DetectedCategory[];
+  /** Structured business info derived from the imported data (absent on legacy previews). */
+  enrichment?: BoutiqueEnrichment;
   city: string | null;
   recentPosts: BoutiquePost[];
   // Richer profile metadata (optional: older preview payloads predate these).

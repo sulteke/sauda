@@ -62,6 +62,8 @@ model Boutique {
   manualCategoriesAdded String[] @default([]) @map("manual_categories_added")
   /// Category ids an admin removed by hand (Stage 3).
   manualCategoriesRemoved String[] @default([]) @map("manual_categories_removed")
+  /// Structured business info derived from imported data (phones, links, city, hours…).
+  enrichment     Json?          @map("enrichment")
   followersCount Int?           @map("followers_count")
   externalUrl    String?        @map("external_url")
   /// First recent Instagram posts captured at import time (array of post objects).

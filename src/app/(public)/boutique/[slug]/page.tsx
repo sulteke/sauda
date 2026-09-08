@@ -6,6 +6,10 @@ import { ArrowLeft, ExternalLink, Instagram, Users } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  BusinessInfo,
+  hasEnrichmentData,
+} from "@/features/boutiques/components/business-info";
 import { BoutiqueGallery } from "@/features/marketplace/components/boutique-gallery";
 import { getPublicBoutiqueBySlug } from "@/services/public-marketplace.service";
 import { formatNumber } from "@/utils/format";
@@ -98,6 +102,13 @@ export default async function PublicBoutiquePage({
           </div>
         </div>
       </div>
+
+      {hasEnrichmentData(boutique.enrichment) ? (
+        <section className="space-y-3">
+          <h2 className="text-lg font-semibold tracking-tight">Business information</h2>
+          <BusinessInfo enrichment={boutique.enrichment} />
+        </section>
+      ) : null}
 
       {boutique.posts.length > 0 ? (
         <section className="space-y-3">

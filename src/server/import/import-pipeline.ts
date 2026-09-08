@@ -2,6 +2,7 @@ import "server-only";
 
 import { Prisma, type ImportJob } from "@prisma/client";
 
+import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
   detectAutoCategories,
@@ -56,6 +57,13 @@ export function mapProfileToPreview(
     category: productCategories[0]?.label ?? null,
     productCategories,
     categoryScores: autoDetected,
+    // Enrichment: structured business info derived from the same imported data.
+    enrichment: enrichBoutique({
+      biography: profile.biography,
+      externalUrl: profile.externalUrl,
+      externalUrls: profile.externalUrls,
+      businessAddress: profile.businessAddress,
+    }),
     city: null,
     recentPosts: profile.recentPosts.slice(0, 6),
     isBusinessAccount: profile.isBusinessAccount,
@@ -176,6 +184,7 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       category: primaryCategory,
       productCategories: finalCategoryIds,
       categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
+      enrichment: jsonOrDbNull(preview.enrichment),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
@@ -202,6 +211,7 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       category: primaryCategory,
       productCategories: finalCategoryIds,
       categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
+      enrichment: jsonOrDbNull(preview.enrichment),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,

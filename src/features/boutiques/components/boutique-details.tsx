@@ -25,6 +25,7 @@ import type { LucideIcon } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { BusinessInfo, hasEnrichmentData } from "@/features/boutiques/components/business-info";
 import { CategoryEditor } from "@/features/boutiques/components/category-editor";
 import { BOUTIQUE_STATUS_LABELS } from "@/features/boutiques/schemas";
 import { ALL_PRODUCT_CATEGORIES } from "@/lib/category-engine";
@@ -286,6 +287,20 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
           ) : null}
         </CardContent>
       </Card>
+
+      {hasEnrichmentData(boutique.enrichment) ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <h2 className="text-lg font-semibold tracking-tight">Business information</h2>
+            <p className="text-xs text-muted-foreground">
+              Extracted automatically from the imported profile — no extra scraping.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <BusinessInfo enrichment={boutique.enrichment} />
+          </CardContent>
+        </Card>
+      ) : null}
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold tracking-tight">Recent posts</h2>

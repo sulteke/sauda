@@ -1,6 +1,8 @@
 import type { Prisma } from "@prisma/client";
 
+import { EMPTY_ENRICHMENT } from "@/lib/boutique-enrichment";
 import type {
+  BoutiqueEnrichment,
   BoutiquePost,
   DetectedCategory,
   InstagramBusinessAddress,
@@ -43,4 +45,10 @@ export function parseCategoryScores(
   value: Prisma.JsonValue | null | undefined,
 ): DetectedCategory[] {
   return Array.isArray(value) ? (value as unknown as DetectedCategory[]) : [];
+}
+
+/** Parses stored enrichment, filling any missing keys from the empty template. */
+export function parseEnrichment(value: Prisma.JsonValue | null | undefined): BoutiqueEnrichment {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return EMPTY_ENRICHMENT;
+  return { ...EMPTY_ENRICHMENT, ...(value as unknown as Partial<BoutiqueEnrichment>) };
 }

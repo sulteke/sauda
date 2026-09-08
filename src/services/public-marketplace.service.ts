@@ -5,6 +5,7 @@ import type { Boutique, Prisma } from "@prisma/client";
 import {
   parseBusinessAddress,
   parseCategoryScores,
+  parseEnrichment,
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
@@ -35,6 +36,7 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     categoryScores: parseCategoryScores(row.categoryScores),
     manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
     manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
+    enrichment: parseEnrichment(row.enrichment),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,

@@ -6,6 +6,7 @@ import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas
 import {
   parseBusinessAddress,
   parseCategoryScores,
+  parseEnrichment,
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
@@ -32,6 +33,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     categoryScores: parseCategoryScores(row.categoryScores),
     manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
     manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
+    enrichment: parseEnrichment(row.enrichment),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
