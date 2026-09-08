@@ -54,10 +54,14 @@ model Boutique {
   bio            String?
   /// Primary auto-detected product category label (backward-compatible single value).
   category       String?
-  /// All auto-detected product-category ids (from the detection engine).
+  /// Final product-category ids: auto-detected, plus manual adds, minus manual removes.
   productCategories String[]    @default([]) @map("product_categories")
-  /// Scored detection breakdown + match evidence (why each category was assigned).
+  /// Auto-detected scored breakdown + match evidence (Stages 1–2; the "why").
   categoryScores Json?          @map("category_scores")
+  /// Category ids an admin added by hand (Stage 3).
+  manualCategoriesAdded String[] @default([]) @map("manual_categories_added")
+  /// Category ids an admin removed by hand (Stage 3).
+  manualCategoriesRemoved String[] @default([]) @map("manual_categories_removed")
   followersCount Int?           @map("followers_count")
   externalUrl    String?        @map("external_url")
   /// First recent Instagram posts captured at import time (array of post objects).

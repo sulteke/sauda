@@ -34,6 +34,11 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   threshold: SCORE_THRESHOLD,
 };
 
+/** Every product category (id + label) in dictionary order — the pick list. */
+export const ALL_PRODUCT_CATEGORIES: ProductCategory[] = CATEGORY_DICTIONARY.map(
+  ({ id, label }) => ({ id, label }),
+);
+
 export interface CategoryAnalysisPost {
   caption: string | null;
   hashtags: string[];

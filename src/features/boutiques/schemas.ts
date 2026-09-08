@@ -51,3 +51,15 @@ export type BoutiqueInput = z.infer<typeof boutiqueInputSchema>;
 export const boutiqueUpdateSchema = boutiqueInputSchema.partial();
 
 export type BoutiqueUpdate = z.infer<typeof boutiqueUpdateSchema>;
+
+/** Manual category correction (Stage 3): ids to add and/or remove. */
+export const categoryCorrectionSchema = z
+  .object({
+    add: z.array(z.string().trim().min(1)).max(50).optional(),
+    remove: z.array(z.string().trim().min(1)).max(50).optional(),
+  })
+  .refine((v) => (v.add?.length ?? 0) + (v.remove?.length ?? 0) > 0, {
+    message: "Provide at least one category to add or remove",
+  });
+
+export type CategoryCorrection = z.infer<typeof categoryCorrectionSchema>;

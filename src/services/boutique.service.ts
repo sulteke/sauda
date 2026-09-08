@@ -11,6 +11,7 @@ import {
   parseRelatedProfiles,
 } from "@/lib/boutique-json";
 import { resolveProductCategories } from "@/lib/category-engine";
+import { applyCorrection, mergeCategories } from "@/lib/category-pipeline";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO, BoutiqueStatus } from "@/types";
 import { slugify } from "@/utils/format";
@@ -29,6 +30,8 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
     categoryScores: parseCategoryScores(row.categoryScores),
+    manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
+    manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
@@ -132,6 +135,40 @@ export async function updateBoutique(id: string, input: BoutiqueUpdate): Promise
   }
 
   const row = await prisma.boutique.update({ where: { id }, data });
+  return toDTO(row);
+}
+
+/**
+ * Stage 3 — manual category corrections. Applies an admin add/remove change on
+ * top of the auto-detected categories, recomputes the final list, and persists
+ * the overrides + final list. Auto-detection (categoryScores) is untouched, so
+ * the provenance of every category stays intact and a later re-import still
+ * respects these corrections.
+ */
+export async function applyCategoryCorrection(
+  id: string,
+  change: { add?: string[]; remove?: string[] },
+): Promise<BoutiqueDTO> {
+  const current = await prisma.boutique.findUniqueOrThrow({ where: { id } });
+  const autoDetected = parseCategoryScores(current.categoryScores);
+  const autoIds = autoDetected.map((c) => c.id);
+
+  const next = applyCorrection(
+    { added: current.manualCategoriesAdded, removed: current.manualCategoriesRemoved },
+    autoIds,
+    change,
+  );
+  const merged = mergeCategories(autoDetected, next);
+
+  const row = await prisma.boutique.update({
+    where: { id },
+    data: {
+      manualCategoriesAdded: next.added,
+      manualCategoriesRemoved: next.removed,
+      productCategories: merged.categories.map((c) => c.id),
+      category: merged.categories[0]?.label ?? null,
+    },
+  });
   return toDTO(row);
 }
 

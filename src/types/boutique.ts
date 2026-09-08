@@ -54,10 +54,14 @@ export interface BoutiqueDTO {
   bio: string | null;
   /** Primary detected product category label (backward-compatible single value). */
   category: string | null;
-  /** All auto-detected product categories, richest-first. */
+  /** Final product categories (auto-detected + manual adds − manual removes), richest-first. */
   productCategories: ProductCategory[];
-  /** Full scored detection breakdown with match evidence (why each was assigned). */
+  /** Auto-detected scored breakdown with match evidence (Stages 1–2; the "why"). */
   categoryScores: DetectedCategory[];
+  /** Categories an admin added by hand (Stage 3). */
+  manualCategoriesAdded: ProductCategory[];
+  /** Categories an admin removed by hand (Stage 3). */
+  manualCategoriesRemoved: ProductCategory[];
   followersCount: number | null;
   externalUrl: string | null;
   instagramHandle: string | null;

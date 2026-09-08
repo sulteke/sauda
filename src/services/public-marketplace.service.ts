@@ -33,6 +33,8 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
     categoryScores: parseCategoryScores(row.categoryScores),
+    manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
+    manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,

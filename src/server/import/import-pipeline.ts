@@ -2,31 +2,46 @@ import "server-only";
 
 import { Prisma, type ImportJob } from "@prisma/client";
 
-import { detectCategories } from "@/lib/category-engine";
+import {
+  type CategoryDetectionInput,
+  detectAutoCategories,
+  EMPTY_OVERRIDES,
+  mergeCategories,
+} from "@/lib/category-pipeline";
 import { prisma } from "@/lib/prisma";
-import type { BoutiquePreview, ImportJobDTO } from "@/types";
+import type { BoutiquePreview, DetectedCategory, ImportJobDTO } from "@/types";
 import { slugify } from "@/utils/format";
 
 import { ImportStateError } from "./errors";
 import { getInstagramProvider } from "./instagram-provider";
 import type { RawInstagramProfile } from "./provider-types";
 
-/** Normalizes a raw provider profile into a boutique draft. */
-export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePreview {
-  // Auto-detect product categories from the boutique's own text via the
-  // detection engine. The engine — not Instagram's businessCategoryName — is the
-  // sole source of a boutique's category. The primary (highest-scoring) label
-  // doubles as the single `category` value so existing surfaces keep working;
-  // the full scored result (with match evidence) is kept as categoryScores.
-  const detected = detectCategories({
+/** Builds the category-pipeline input (text + media) from a raw profile. */
+function toDetectionInput(profile: RawInstagramProfile): CategoryDetectionInput {
+  return {
     biography: profile.biography,
+    avatarUrl: profile.profilePicUrl,
     posts: profile.recentPosts.map((post) => ({
       caption: post.caption,
       hashtags: post.hashtags,
       mentions: post.mentions,
+      imageUrl: post.imageUrl,
     })),
-  });
-  const productCategories = detected.map(({ id, label }) => ({ id, label }));
+  };
+}
+
+/**
+ * Normalizes a raw provider profile into a boutique draft. Category detection is
+ * done by the pipeline (Stages 1–2) and passed in as `autoDetected`; the primary
+ * (highest-scoring) label doubles as the single `category` value so existing
+ * surfaces keep working, and the full scored result is kept as categoryScores.
+ * Manual overrides (Stage 3) are applied later, at persist time.
+ */
+export function mapProfileToPreview(
+  profile: RawInstagramProfile,
+  autoDetected: DetectedCategory[],
+): BoutiquePreview {
+  const productCategories = autoDetected.map(({ id, label }) => ({ id, label }));
 
   return {
     name: profile.fullName?.trim() || profile.handle,
@@ -40,7 +55,7 @@ export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePrevi
     isVerified: profile.isVerified,
     category: productCategories[0]?.label ?? null,
     productCategories,
-    categoryScores: detected,
+    categoryScores: autoDetected,
     city: null,
     recentPosts: profile.recentPosts.slice(0, 6),
     isBusinessAccount: profile.isBusinessAccount,
@@ -95,7 +110,9 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       url: job.sourceUrl,
       handle: job.handle ?? "",
     });
-    const preview = mapProfileToPreview(profile);
+    // Run the category pipeline's detection stages (keyword now, image later).
+    const autoDetected = await detectAutoCategories(toDetectionInput(profile));
+    const preview = mapProfileToPreview(profile, autoDetected);
 
     return await prisma.importJob.update({
       where: { id: jobId },
@@ -133,16 +150,32 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
     throw new ImportStateError("Import job has no preview to save.");
   }
 
+  // Re-detection produced the auto categories (Stages 1–2). Merge them with any
+  // manual admin overrides (Stage 3) already stored for this handle, so admin
+  // corrections survive re-imports. New boutiques have no overrides yet.
+  const autoDetected = preview.categoryScores ?? [];
+  const existing = await prisma.boutique.findUnique({
+    where: { instagramHandle: preview.instagramHandle },
+    select: { manualCategoriesAdded: true, manualCategoriesRemoved: true },
+  });
+  const overrides = existing
+    ? { added: existing.manualCategoriesAdded, removed: existing.manualCategoriesRemoved }
+    : EMPTY_OVERRIDES;
+  const merged = mergeCategories(autoDetected, overrides);
+  const finalCategoryIds = merged.categories.map((c) => c.id);
+  const primaryCategory = merged.categories[0]?.label ?? null;
+
   const boutique = await prisma.boutique.upsert({
     where: { instagramHandle: preview.instagramHandle },
     // Re-import refreshes ONLY the imported/enrichment fields. Manually-owned
-    // fields (name, city, status, description) are never overwritten.
+    // fields (name, city, status, description) and manual category overrides are
+    // never overwritten.
     update: {
       avatarUrl: preview.avatarUrl,
       bio: preview.description,
-      category: preview.category,
-      productCategories: (preview.productCategories ?? []).map((c) => c.id),
-      categoryScores: (preview.categoryScores ?? []) as unknown as Prisma.InputJsonValue,
+      category: primaryCategory,
+      productCategories: finalCategoryIds,
+      categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
@@ -166,9 +199,9 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       instagramUrl: preview.instagramUrl,
       avatarUrl: preview.avatarUrl,
       bio: preview.description,
-      category: preview.category,
-      productCategories: (preview.productCategories ?? []).map((c) => c.id),
-      categoryScores: (preview.categoryScores ?? []) as unknown as Prisma.InputJsonValue,
+      category: primaryCategory,
+      productCategories: finalCategoryIds,
+      categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
