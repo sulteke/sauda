@@ -260,6 +260,21 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
             ) : null}
           </div>
 
+          {boutique.productCategories.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                Product categories
+              </div>
+              <ul className="flex flex-wrap gap-2">
+                {boutique.productCategories.map((cat) => (
+                  <li key={cat.id}>
+                    <Badge variant="secondary">{cat.label}</Badge>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           {extraLinks.length > 0 ? (
             <div className="space-y-2">
               <div className="text-xs uppercase tracking-wide text-muted-foreground">Links</div>

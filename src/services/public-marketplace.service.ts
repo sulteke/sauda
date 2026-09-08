@@ -8,9 +8,9 @@ import {
   parsePosts,
   parseRelatedProfiles,
 } from "@/lib/boutique-json";
+import { categoryLabel, resolveProductCategories } from "@/lib/category-analyzer";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO } from "@/types";
-import { slugify } from "@/utils/format";
 
 // A boutique is public once the admin has approved it in the review pipeline.
 const PUBLIC_WHERE: Prisma.BoutiqueWhereInput = {
@@ -30,6 +30,7 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     avatarUrl: row.avatarUrl,
     bio: row.bio,
     category: row.category,
+    productCategories: resolveProductCategories(row.productCategories),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
@@ -106,39 +107,46 @@ export interface CategorySummary {
   count: number;
 }
 
-/** Distinct categories across public boutiques, with counts. */
+/**
+ * Distinct product categories across public boutiques, with counts. Aggregated
+ * over the multi-valued `productCategories` (a boutique can appear under several
+ * categories). Slug = category id; name = its display label.
+ */
 export async function listCategories(): Promise<CategorySummary[]> {
   try {
-    const grouped = await prisma.boutique.groupBy({
-      by: ["category"],
-      where: { AND: [PUBLIC_WHERE, { category: { not: null } }] },
-      _count: { _all: true },
+    const rows = await prisma.boutique.findMany({
+      where: PUBLIC_WHERE,
+      select: { productCategories: true },
     });
-    return grouped
-      .filter((group): group is typeof group & { category: string } => Boolean(group.category))
-      .map((group) => ({
-        name: group.category,
-        slug: slugify(group.category),
-        count: group._count._all,
-      }))
-      .sort((a, b) => b.count - a.count);
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      for (const id of row.productCategories) {
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+    }
+
+    return [...counts.entries()]
+      .map(([id, count]) => ({ name: categoryLabel(id) ?? id, slug: id, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   } catch (error) {
     console.error("Public category query failed:", error);
     return [];
   }
 }
 
-/** Resolves a category slug to its boutiques (slug derived from the category name). */
+/** Resolves a category slug (its id) to its boutiques. */
 export async function getCategoryBySlug(
   slug: string,
 ): Promise<{ category: CategorySummary; boutiques: BoutiqueDTO[] } | null> {
-  const categories = await listCategories();
-  const category = categories.find((entry) => entry.slug === slug);
-  if (!category) return null;
+  const label = categoryLabel(slug);
+  if (!label) return null;
 
   const boutiques = await findPublic({
-    where: { category: category.name },
+    where: { productCategories: { has: slug } },
     orderBy: [{ followersCount: "desc" }, { createdAt: "desc" }],
   });
-  return { category, boutiques };
+  if (boutiques.length === 0) return null;
+
+  return { category: { name: label, slug, count: boutiques.length }, boutiques };
 }

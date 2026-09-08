@@ -1,4 +1,5 @@
 export type { BoutiqueDTO, BoutiquePost, BoutiqueStatus } from "./boutique";
+export type { DetectedCategory, ProductCategory } from "./category";
 export type { DashboardStats } from "./dashboard";
 export type {
   InstagramBusinessAddress,

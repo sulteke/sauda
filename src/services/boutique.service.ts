@@ -9,6 +9,7 @@ import {
   parsePosts,
   parseRelatedProfiles,
 } from "@/lib/boutique-json";
+import { resolveProductCategories } from "@/lib/category-analyzer";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO, BoutiqueStatus } from "@/types";
 import { slugify } from "@/utils/format";
@@ -25,6 +26,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     avatarUrl: row.avatarUrl,
     bio: row.bio,
     category: row.category,
+    productCategories: resolveProductCategories(row.productCategories),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,

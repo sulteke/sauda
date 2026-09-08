@@ -1,3 +1,4 @@
+import type { ProductCategory } from "./category";
 import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
@@ -51,7 +52,10 @@ export interface BoutiqueDTO {
   telegramQueued: boolean;
   avatarUrl: string | null;
   bio: string | null;
+  /** Primary detected product category label (backward-compatible single value). */
   category: string | null;
+  /** All auto-detected product categories, richest-first. */
+  productCategories: ProductCategory[];
   followersCount: number | null;
   externalUrl: string | null;
   instagramHandle: string | null;

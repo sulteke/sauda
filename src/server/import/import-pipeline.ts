@@ -2,6 +2,7 @@ import "server-only";
 
 import { Prisma, type ImportJob } from "@prisma/client";
 
+import { analyzeCategories } from "@/lib/category-analyzer";
 import { prisma } from "@/lib/prisma";
 import type { BoutiquePreview, ImportJobDTO } from "@/types";
 import { slugify } from "@/utils/format";
@@ -12,6 +13,20 @@ import type { RawInstagramProfile } from "./provider-types";
 
 /** Normalizes a raw provider profile into a boutique draft. */
 export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePreview {
+  // Auto-detect product categories from the boutique's own text. This replaces
+  // Instagram's `businessCategoryName` (still available in the raw payload) as
+  // the boutique's category. The primary (highest-scoring) label doubles as the
+  // single `category` value so existing single-category surfaces keep working.
+  const detected = analyzeCategories({
+    biography: profile.biography,
+    posts: profile.recentPosts.map((post) => ({
+      caption: post.caption,
+      hashtags: post.hashtags,
+      mentions: post.mentions,
+    })),
+  });
+  const productCategories = detected.map(({ id, label }) => ({ id, label }));
+
   return {
     name: profile.fullName?.trim() || profile.handle,
     slug: slugify(profile.handle),
@@ -22,7 +37,8 @@ export function mapProfileToPreview(profile: RawInstagramProfile): BoutiquePrevi
     externalUrl: profile.externalUrl,
     followersCount: profile.followersCount,
     isVerified: profile.isVerified,
-    category: profile.category,
+    category: productCategories[0]?.label ?? null,
+    productCategories,
     city: null,
     recentPosts: profile.recentPosts.slice(0, 6),
     isBusinessAccount: profile.isBusinessAccount,
@@ -123,6 +139,7 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       avatarUrl: preview.avatarUrl,
       bio: preview.description,
       category: preview.category,
+      productCategories: (preview.productCategories ?? []).map((c) => c.id),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
@@ -147,6 +164,7 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       avatarUrl: preview.avatarUrl,
       bio: preview.description,
       category: preview.category,
+      productCategories: (preview.productCategories ?? []).map((c) => c.id),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
       posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,

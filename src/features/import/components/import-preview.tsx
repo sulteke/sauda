@@ -67,7 +67,15 @@ export function ImportPreview({ job, onSave, onReset, isSaving = false }: Import
                   {formatNumber(preview.followersCount)} followers
                 </span>
               ) : null}
-              {preview.category ? <Badge variant="outline">{preview.category}</Badge> : null}
+              {preview.productCategories && preview.productCategories.length > 0
+                ? preview.productCategories.map((cat) => (
+                    <Badge key={cat.id} variant="outline">
+                      {cat.label}
+                    </Badge>
+                  ))
+                : preview.category
+                  ? <Badge variant="outline">{preview.category}</Badge>
+                  : null}
             </div>
           </div>
         </div>

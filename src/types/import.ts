@@ -1,4 +1,5 @@
 import type { BoutiquePost } from "./boutique";
+import type { ProductCategory } from "./category";
 import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
@@ -20,7 +21,10 @@ export interface BoutiquePreview {
   externalUrl: string | null;
   followersCount: number | null;
   isVerified: boolean;
+  /** Primary detected product category label (replaces Instagram's own category). */
   category: string | null;
+  /** All auto-detected product categories, richest-first (absent on legacy previews). */
+  productCategories?: ProductCategory[];
   city: string | null;
   recentPosts: BoutiquePost[];
   // Richer profile metadata (optional: older preview payloads predate these).
