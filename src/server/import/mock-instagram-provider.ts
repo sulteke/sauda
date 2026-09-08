@@ -61,7 +61,6 @@ export class MockInstagramProvider implements InstagramProvider {
       externalUrl,
       followersCount: 500 + (seed % 25000),
       isVerified: seed % 5 === 0,
-      category: "Shopping & Retail",
       recentPosts,
       postsCount: 12 + (seed % 400),
       followsCount: 100 + (seed % 900),

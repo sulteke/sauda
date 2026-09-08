@@ -39,8 +39,6 @@ interface ApifyProfileItem {
   isBusinessAccount?: boolean;
   private?: boolean;
   isPrivate?: boolean;
-  businessCategoryName?: string | null;
-  category?: string | null;
   businessAddress?: unknown;
   relatedProfiles?: unknown;
   latestPosts?: unknown;
@@ -224,7 +222,6 @@ export class ApifyInstagramProvider implements InstagramProvider {
       externalUrl: toString(profile.externalUrl),
       followersCount: toNumber(profile.followersCount),
       isVerified: Boolean(profile.verified ?? profile.isVerified ?? false),
-      category: toString(profile.businessCategoryName) ?? toString(profile.category),
       recentPosts: recentPosts.slice(0, 6).map(
         (post): RawInstagramPost => ({
           imageUrl: post.imageUrl,

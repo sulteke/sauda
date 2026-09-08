@@ -4,11 +4,12 @@ import type { Boutique, Prisma } from "@prisma/client";
 
 import {
   parseBusinessAddress,
+  parseCategoryScores,
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
 } from "@/lib/boutique-json";
-import { categoryLabel, resolveProductCategories } from "@/lib/category-analyzer";
+import { categoryLabel, resolveProductCategories } from "@/lib/category-engine";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO } from "@/types";
 
@@ -31,6 +32,7 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     bio: row.bio,
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
+    categoryScores: parseCategoryScores(row.categoryScores),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,

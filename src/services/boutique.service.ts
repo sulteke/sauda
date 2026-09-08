@@ -5,11 +5,12 @@ import { Prisma, type Boutique } from "@prisma/client";
 import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas";
 import {
   parseBusinessAddress,
+  parseCategoryScores,
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
 } from "@/lib/boutique-json";
-import { resolveProductCategories } from "@/lib/category-analyzer";
+import { resolveProductCategories } from "@/lib/category-engine";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO, BoutiqueStatus } from "@/types";
 import { slugify } from "@/utils/format";
@@ -27,6 +28,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     bio: row.bio,
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
+    categoryScores: parseCategoryScores(row.categoryScores),
     followersCount: row.followersCount,
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,

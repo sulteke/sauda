@@ -1,4 +1,4 @@
-import type { ProductCategory } from "./category";
+import type { DetectedCategory, ProductCategory } from "./category";
 import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
@@ -56,6 +56,8 @@ export interface BoutiqueDTO {
   category: string | null;
   /** All auto-detected product categories, richest-first. */
   productCategories: ProductCategory[];
+  /** Full scored detection breakdown with match evidence (why each was assigned). */
+  categoryScores: DetectedCategory[];
   followersCount: number | null;
   externalUrl: string | null;
   instagramHandle: string | null;

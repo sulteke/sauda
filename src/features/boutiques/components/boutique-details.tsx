@@ -26,8 +26,27 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { BOUTIQUE_STATUS_LABELS } from "@/features/boutiques/schemas";
-import type { BoutiqueDTO, BoutiquePost, InstagramBusinessAddress } from "@/types";
+import type {
+  BoutiqueDTO,
+  BoutiquePost,
+  CategoryMatch,
+  InstagramBusinessAddress,
+} from "@/types";
 import { formatDate, formatNumber } from "@/utils/format";
+
+const MATCH_SOURCE_LABELS: Record<CategoryMatch["source"], string> = {
+  biography: "bio",
+  hashtag: "hashtag",
+  caption: "caption",
+  mention: "mention",
+};
+
+/** Renders one piece of match evidence, e.g. "#hoodie (hashtag)" or "худи (bio ×2)". */
+function formatMatch(match: CategoryMatch): string {
+  const term = match.source === "hashtag" ? `#${match.keyword}` : match.keyword;
+  const count = match.occurrences > 1 ? ` ×${match.occurrences}` : "";
+  return `${term} (${MATCH_SOURCE_LABELS[match.source]}${count})`;
+}
 
 function InfoRow({
   icon: Icon,
@@ -260,7 +279,27 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
             ) : null}
           </div>
 
-          {boutique.productCategories.length > 0 ? (
+          {boutique.categoryScores.length > 0 ? (
+            <div className="space-y-2">
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                Product categories
+              </div>
+              <ul className="space-y-2">
+                {boutique.categoryScores.map((cat) => (
+                  <li key={cat.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <Badge variant="secondary">{cat.label}</Badge>
+                    <span className="text-xs text-muted-foreground">score {cat.score}</span>
+                    {cat.matches.length > 0 ? (
+                      <span className="text-xs text-muted-foreground">
+                        · matched {cat.matches.map(formatMatch).join(", ")}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : boutique.productCategories.length > 0 ? (
+            // Legacy rows imported before match evidence was stored.
             <div className="space-y-2">
               <div className="text-xs uppercase tracking-wide text-muted-foreground">
                 Product categories

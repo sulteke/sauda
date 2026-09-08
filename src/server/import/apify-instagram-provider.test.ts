@@ -68,7 +68,9 @@ describe("ApifyInstagramProvider", () => {
     expect(result.profilePicUrl).toBe("https://img.example/hd.jpg"); // prefers HD
     expect(result.followersCount).toBe(12345);
     expect(result.isVerified).toBe(true);
-    expect(result.category).toBe("Clothing (Brand)");
+    // The provider no longer derives a category from businessCategoryName —
+    // categorization is done downstream by the detection engine.
+    expect(result).not.toHaveProperty("category");
     expect(result.sourceUrl).toBe(REQUEST.url);
 
     const raw = result.raw as {

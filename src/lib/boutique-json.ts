@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import type {
   BoutiquePost,
+  DetectedCategory,
   InstagramBusinessAddress,
   InstagramExternalLink,
   InstagramRelatedProfile,
@@ -36,4 +37,10 @@ export function parseRelatedProfiles(
   value: Prisma.JsonValue | null | undefined,
 ): InstagramRelatedProfile[] {
   return Array.isArray(value) ? (value as unknown as InstagramRelatedProfile[]) : [];
+}
+
+export function parseCategoryScores(
+  value: Prisma.JsonValue | null | undefined,
+): DetectedCategory[] {
+  return Array.isArray(value) ? (value as unknown as DetectedCategory[]) : [];
 }

@@ -42,7 +42,6 @@ export interface RawInstagramProfile {
   externalUrl: string | null;
   followersCount: number | null;
   isVerified: boolean;
-  category: string | null;
   /** First recent posts captured at import time (already normalized). */
   recentPosts: RawInstagramPost[];
   // Richer profile metadata surfaced by the scraper.
