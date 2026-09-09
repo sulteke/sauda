@@ -128,10 +128,12 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
   );
 
   return [
-    "You classify an Instagram clothing/retail business into product categories and profile it.",
+    "You analyze an Instagram clothing/retail business and profile it.",
+    "TASK — categories are MULTI-LABEL, not a single dominant label. Return EVERY product category the business sells, considering the profile name, bio, hashtags and ALL captions across every provided post together. If the business sells shoes, bags, jeans and T-shirts, you MUST return all four. Include a category even if it appears in only one post. Do NOT collapse to just the most common category.",
     "Choose category ids ONLY from the allowed list below. Never invent a category id.",
-    `Include a category ONLY if your confidence is ${AI_CONFIDENCE_THRESHOLD} or higher (scale 0-100). If none qualify, return an empty "categories" array.`,
-    "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — do not classify from scratch and do not discard a clearly-correct keyword result.",
+    `Set each confidence (0-100) to reflect how strongly that category is represented across the posts — more or clearer signals mean higher confidence. Include a category only when your confidence is ${AI_CONFIDENCE_THRESHOLD} or higher; when the business clearly sells a category, give it at least ${AI_CONFIDENCE_THRESHOLD} even if it appears in a single post (use values below ${AI_CONFIDENCE_THRESHOLD} only for genuinely uncertain guesses). If none qualify, return an empty "categories" array.`,
+    "Sort the categories array by confidence, highest first.",
+    "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — never discard a clearly-correct keyword result, and add any other categories the posts reveal.",
     "Respond with STRICT JSON only. No markdown, no code fences, no commentary, no extra fields. Match EXACTLY this schema:",
     '{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}],"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."}',
     "Use null (not empty string) for city, mall, address, targetAudience, priceSegment, style or summary when unknown.",

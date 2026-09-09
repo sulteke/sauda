@@ -53,6 +53,27 @@ describe("buildAiCategoryPrompt", () => {
     expect(prompt).toContain("Validate or EXTEND");
   });
 
+  it("instructs the model to return ALL categories (multi-label), not just the dominant one", () => {
+    const prompt = buildAiCategoryPrompt(request());
+    expect(prompt).toContain("MULTI-LABEL");
+    expect(prompt).toMatch(/return (every|all)/i);
+    expect(prompt).toContain("even if it appears in only one post");
+    expect(prompt).toContain("Do NOT collapse to just the most common category");
+    expect(prompt).toContain("Sort the categories array by confidence, highest first");
+  });
+
+  it("parseAiCategoryResult keeps ALL categories the model returns (no cap)", () => {
+    const many = parseAiCategoryResult({
+      categories: [
+        { id: "obuv", confidence: 95, reason: "shoes" },
+        { id: "sumki", confidence: 80, reason: "bags" },
+        { id: "dzhinsy", confidence: 72, reason: "jeans" },
+        { id: "futbolki", confidence: 61, reason: "tees" },
+      ],
+    });
+    expect(many.categories.map((c) => c.id)).toEqual(["obuv", "sumki", "dzhinsy", "futbolki"]);
+  });
+
   it("includes keyword-engine results as prior context", () => {
     const prompt = buildAiCategoryPrompt({
       ...request(),
