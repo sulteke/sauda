@@ -94,6 +94,12 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
       });
 
       if (!response.ok) {
+        // TEMP debug logging — remove later. Full error body (never the key/URL).
+        console.log("GEMINI_ERROR_BODY", {
+          status: response.status,
+          statusText: response.statusText,
+          body: await response.text(),
+        });
         // TEMP debug logging — remove later.
         logger.info("gemini.debug.request_failed", {
           provider: this.name,
@@ -115,6 +121,8 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
       const text = (payload.candidates?.[0]?.content?.parts ?? [])
         .map((p) => p.text ?? "")
         .join("");
+      // TEMP debug logging — remove later. Raw model text before parsing.
+      console.log("GEMINI_RAW_RESPONSE_TEXT", text);
       const result = parseAiCategoryResult(text);
       const usage = payload.usageMetadata ?? {};
 
