@@ -2,6 +2,7 @@ import "server-only";
 
 import { Prisma, type ImportJob } from "@prisma/client";
 
+import { getAiCategoryProvider } from "@/lib/ai-category-provider";
 import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
@@ -17,7 +18,7 @@ import { ImportStateError } from "./errors";
 import { getInstagramProvider } from "./instagram-provider";
 import type { RawInstagramProfile } from "./provider-types";
 
-/** Builds the category-pipeline input (text + media) from a raw profile. */
+/** Builds the category-pipeline input (text + media + AI context) from a profile. */
 function toDetectionInput(profile: RawInstagramProfile): CategoryDetectionInput {
   return {
     biography: profile.biography,
@@ -28,6 +29,11 @@ function toDetectionInput(profile: RawInstagramProfile): CategoryDetectionInput 
       mentions: post.mentions,
       imageUrl: post.imageUrl,
     })),
+    businessName: profile.fullName,
+    username: profile.handle,
+    externalUrl: profile.externalUrl,
+    externalUrls: profile.externalUrls,
+    businessAddress: profile.businessAddress,
   };
 }
 
@@ -118,8 +124,11 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       url: job.sourceUrl,
       handle: job.handle ?? "",
     });
-    // Run the category pipeline's detection stages (keyword now, image later).
-    const autoDetected = await detectAutoCategories(toDetectionInput(profile));
+    // Run the category pipeline's detection stages: keyword → AI (disabled until
+    // a provider is wired) → image (hook). Results are merged by the pipeline.
+    const autoDetected = await detectAutoCategories(toDetectionInput(profile), {
+      aiProvider: getAiCategoryProvider(),
+    });
     const preview = mapProfileToPreview(profile, autoDetected);
 
     return await prisma.importJob.update({

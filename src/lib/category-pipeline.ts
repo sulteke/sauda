@@ -1,5 +1,12 @@
 import type { CategoryMatch, DetectedCategory, ProductCategory } from "@/types/category";
+import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
 
+import {
+  type AiCategoryProvider,
+  AI_CONFIDENCE_THRESHOLD,
+  type AiCategoryRequest,
+  disabledAiCategoryProvider,
+} from "./ai-category-provider";
 import {
   categoryLabel,
   DEFAULT_ENGINE_CONFIG,
@@ -8,27 +15,30 @@ import {
 } from "./category-engine";
 
 /**
- * Multi-stage category pipeline.
+ * Multi-stage category pipeline (hybrid):
+ *
+ *   Instagram → Apify → Keyword Engine → AI Category Analyzer → Manual Review
  *
  * Category detection is a pipeline of independent stages whose results are
  * merged into one final product-category list:
  *
  *   Stage 1 — keyword detection (bio, captions, hashtags, mentions). Implemented
  *             by the keyword engine.
- *   Stage 2 — image classification. A pluggable HOOK only: the interface is
- *             defined here and a no-op default is wired in, so a real classifier
- *             can be dropped in later without touching the pipeline or callers.
+ *   Stage 2 — AI category analysis (text only). A pluggable provider seam; the
+ *             default provider is disabled (no model connected), so it adds
+ *             nothing until a real provider is wired in.
+ *   Stage 2b — image classification. A separate pluggable HOOK (no-op default).
  *   Stage 3 — manual admin corrections. Admins add or remove categories; the
  *             overrides are stored so we always know which categories were
  *             auto-detected and which were added or removed by hand.
  *
- * `mergeCategories` combines the auto-detected stages (1 + 2) with the manual
- * overrides (3) into the final list, preserving full provenance.
+ * `mergeCategories` combines the auto-detected stages with the manual overrides
+ * (Stage 3) into the final list, preserving full provenance.
  */
 
-export type CategoryStageName = "keyword" | "image" | "manual";
+export type CategoryStageName = "keyword" | "ai" | "image" | "manual";
 
-/** A post as seen by the pipeline. Carries media so Stage 2 can use images. */
+/** A post as seen by the pipeline. Carries media so the image hook can use it. */
 export interface CategoryPipelinePost {
   caption: string | null;
   hashtags: string[];
@@ -40,6 +50,13 @@ export interface CategoryDetectionInput {
   biography: string | null;
   avatarUrl: string | null;
   posts: CategoryPipelinePost[];
+  // Extra context consumed by the AI stage. Optional so existing callers and the
+  // keyword/image stages are unaffected.
+  businessName?: string | null;
+  username?: string | null;
+  externalUrl?: string | null;
+  externalUrls?: InstagramExternalLink[];
+  businessAddress?: InstagramBusinessAddress | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,8 +131,61 @@ export function createImageStage(
   };
 }
 
+const uniqStrings = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
+
+/** Builds the AI request (text only) from the pipeline input + allowed categories. */
+function toAiRequest(input: CategoryDetectionInput, config: EngineConfig): AiCategoryRequest {
+  return {
+    businessName: input.businessName ?? null,
+    username: input.username ?? null,
+    biography: input.biography,
+    externalUrl: input.externalUrl ?? null,
+    externalUrls: input.externalUrls ?? [],
+    businessAddress: input.businessAddress ?? null,
+    captions: input.posts
+      .map((p) => p.caption)
+      .filter((c): c is string => typeof c === "string" && c.length > 0),
+    hashtags: uniqStrings(input.posts.flatMap((p) => p.hashtags ?? [])),
+    mentions: uniqStrings(input.posts.flatMap((p) => p.mentions ?? [])),
+    allowedCategories: config.dictionary.map(({ id, label }) => ({ id, label })),
+  };
+}
+
+/**
+ * AI detection stage. Wraps an AiCategoryProvider, then enforces the hard rules
+ * in code regardless of what the model returns: invented category ids are
+ * dropped, and suggestions below the confidence threshold are ignored. Valid
+ * suggestions become DetectedCategory entries (score = confidence) so they merge
+ * uniformly with the keyword stage. Defaults to the disabled provider.
+ */
+export function createAiCategoryStage(
+  provider: AiCategoryProvider = disabledAiCategoryProvider,
+  config: EngineConfig = DEFAULT_ENGINE_CONFIG,
+): CategoryDetectionStage {
+  return {
+    name: "ai",
+    detect: async (input) => {
+      const result = await provider.analyze(toAiRequest(input, config));
+      const byId = new Map<string, DetectedCategory>();
+      for (const suggestion of result.categories) {
+        const label = categoryLabel(suggestion.id, config);
+        if (!label) continue; // reject invented ids — must be an internal category
+        if (!(suggestion.confidence >= AI_CONFIDENCE_THRESHOLD)) continue; // below threshold
+        const score = Math.round(Math.max(0, Math.min(100, suggestion.confidence)));
+        const existing = byId.get(suggestion.id);
+        if (!existing || score > existing.score) {
+          byId.set(suggestion.id, { id: suggestion.id, label, score, matches: [] });
+        }
+      }
+      return [...byId.values()];
+    },
+  };
+}
+
 export interface CategoryPipelineOptions {
   config?: EngineConfig;
+  /** AI provider for the AI stage (defaults to the disabled provider). */
+  aiProvider?: AiCategoryProvider;
   imageClassifier?: ImageCategoryClassifier;
   /** Override the detection stages entirely (used in tests). */
   stages?: CategoryDetectionStage[];
@@ -129,8 +199,11 @@ export async function detectAutoCategories(
   input: CategoryDetectionInput,
   options: CategoryPipelineOptions = {},
 ): Promise<DetectedCategory[]> {
-  const stages =
-    options.stages ?? [createKeywordStage(options.config), createImageStage(options.imageClassifier)];
+  const stages = options.stages ?? [
+    createKeywordStage(options.config),
+    createAiCategoryStage(options.aiProvider, options.config),
+    createImageStage(options.imageClassifier),
+  ];
 
   const byId = new Map<string, DetectedCategory>();
   for (const stage of stages) {

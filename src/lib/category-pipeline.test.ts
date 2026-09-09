@@ -2,16 +2,26 @@ import { describe, expect, it } from "vitest";
 
 import type { DetectedCategory } from "@/types/category";
 
+import type { AiCategoryProvider, AiCategoryResult } from "./ai-category-provider";
 import {
   applyCorrection,
   type CategoryDetectionInput,
   type CategoryDetectionStage,
+  createAiCategoryStage,
   detectAutoCategories,
   type ImageCategoryClassifier,
   mergeCategories,
   noopImageClassifier,
   runCategoryPipeline,
 } from "./category-pipeline";
+
+/** Builds a fake AI provider returning a fixed result — no model involved. */
+const fakeAiProvider = (result: Partial<AiCategoryResult>): AiCategoryProvider => ({
+  name: "fake",
+  async analyze() {
+    return { categories: [], city: null, mall: null, address: null, summary: null, ...result };
+  },
+});
 
 const input = (biography: string | null): CategoryDetectionInput => ({
   biography,
@@ -74,6 +84,71 @@ describe("detection stages", () => {
     expect(a?.score).toBe(9);
     expect(a?.matches).toHaveLength(2);
     expect(auto.map((c) => c.id)).toEqual(expect.arrayContaining(["a", "b"]));
+  });
+});
+
+describe("AI category stage", () => {
+  it("keeps only allowed ids at or above the confidence threshold", async () => {
+    const stage = createAiCategoryStage(
+      fakeAiProvider({
+        categories: [
+          { id: "obuv", confidence: 80, reason: "sells shoes" }, // valid
+          { id: "not-a-category", confidence: 95, reason: "invented" }, // invented → dropped
+          { id: "hudi", confidence: 40, reason: "maybe" }, // below 60 → dropped
+        ],
+      }),
+    );
+    const result = await stage.detect(input("любой текст"));
+    expect(result).toEqual([{ id: "obuv", label: "Обувь", score: 80, matches: [] }]);
+  });
+
+  it("the disabled provider (default) contributes nothing", async () => {
+    const stage = createAiCategoryStage();
+    expect(await stage.detect(input("магазин джинсов"))).toEqual([]);
+  });
+
+  it("merges AI results with the keyword stage via detectAutoCategories", async () => {
+    // keyword finds dzhinsy (score 5); AI adds obuv (confidence 90).
+    const auto = await detectAutoCategories(input("магазин джинсы"), {
+      aiProvider: fakeAiProvider({ categories: [{ id: "obuv", confidence: 90, reason: "shoes" }] }),
+    });
+    const ids = auto.map((c) => c.id);
+    expect(ids).toContain("dzhinsy");
+    expect(ids).toContain("obuv");
+    // AI's high-confidence obuv outranks the keyword dzhinsy.
+    expect(auto[0]?.id).toBe("obuv");
+    expect(auto.find((c) => c.id === "obuv")?.score).toBe(90);
+  });
+
+  it("receives the full text context (name, username, links) in the request", async () => {
+    let seen: unknown;
+    const provider: AiCategoryProvider = {
+      name: "spy",
+      async analyze(req) {
+        seen = req;
+        return { categories: [], city: null, mall: null, address: null, summary: null };
+      },
+    };
+    await createAiCategoryStage(provider).detect({
+      biography: "bio",
+      avatarUrl: null,
+      businessName: "Qoima",
+      username: "qoima",
+      externalUrl: "https://qoima.asia",
+      externalUrls: [{ title: null, url: "https://qoima.asia" }],
+      businessAddress: null,
+      posts: [{ caption: "new drop", hashtags: ["sale"], mentions: ["brand"], imageUrl: null }],
+    });
+    expect(seen).toMatchObject({
+      businessName: "Qoima",
+      username: "qoima",
+      externalUrl: "https://qoima.asia",
+      captions: ["new drop"],
+      hashtags: ["sale"],
+      mentions: ["brand"],
+    });
+    // Allowed categories are always provided so the model cannot invent ids.
+    expect((seen as { allowedCategories: unknown[] }).allowedCategories.length).toBeGreaterThan(0);
   });
 });
 
