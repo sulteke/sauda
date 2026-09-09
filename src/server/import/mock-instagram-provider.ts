@@ -1,5 +1,6 @@
 import "server-only";
 
+import { MAX_RECENT_POSTS } from "./provider-types";
 import type {
   InstagramProfileRequest,
   InstagramProvider,
@@ -34,7 +35,7 @@ export class MockInstagramProvider implements InstagramProvider {
   async fetchProfile({ url, handle }: InstagramProfileRequest): Promise<RawInstagramProfile> {
     const seed = hashToInt(handle);
     const externalUrl = `https://${handle.replace(/[^a-z0-9]/gi, "")}.example`;
-    const recentPosts = Array.from({ length: 6 }, (_, i) => ({
+    const recentPosts = Array.from({ length: MAX_RECENT_POSTS }, (_, i) => ({
       imageUrl: `https://picsum.photos/seed/${handle}-${i}/500/500`,
       caption: `Auto-discovered post ${i + 1} from @${handle}`,
       likes: 40 + ((seed + i * 7) % 1200),

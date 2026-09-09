@@ -16,6 +16,7 @@ import { slugify } from "@/utils/format";
 
 import { ImportStateError } from "./errors";
 import { getInstagramProvider } from "./instagram-provider";
+import { MAX_RECENT_POSTS } from "./provider-types";
 import type { RawInstagramProfile } from "./provider-types";
 
 /** Builds the category-pipeline input (text + media + AI context) from a profile. */
@@ -71,7 +72,7 @@ export function mapProfileToPreview(
       businessAddress: profile.businessAddress,
     }),
     city: null,
-    recentPosts: profile.recentPosts.slice(0, 6),
+    recentPosts: profile.recentPosts.slice(0, MAX_RECENT_POSTS),
     isBusinessAccount: profile.isBusinessAccount,
     isPrivate: profile.isPrivate,
     postsCount: profile.postsCount,

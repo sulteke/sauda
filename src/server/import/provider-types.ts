@@ -8,6 +8,16 @@ import type {
 } from "@/types/instagram";
 
 /**
+ * Maximum recent posts imported per profile. The Instagram Profile Scraper
+ * returns at most ~12 `latestPosts` regardless of the `resultsLimit` sent
+ * (verified empirically against real business accounts at limits 30/50/100 —
+ * all returned 12), so 12 is the stable ceiling for the current actor. Fetching
+ * 30–50 would require a different actor or post pagination, which would change
+ * the architecture. Every provider caps its `recentPosts` at this value.
+ */
+export const MAX_RECENT_POSTS = 12;
+
+/**
  * Source-agnostic shape of a discovered Instagram profile. Every provider —
  * mock today, a real scraper tomorrow — returns this exact shape, so the import
  * pipeline never changes when the source changes.

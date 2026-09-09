@@ -11,6 +11,7 @@ import type {
 } from "@/types/instagram";
 
 import { InstagramProviderError } from "./errors";
+import { MAX_RECENT_POSTS } from "./provider-types";
 import type {
   InstagramProfileRequest,
   InstagramProvider,
@@ -222,7 +223,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
       externalUrl: toString(profile.externalUrl),
       followersCount: toNumber(profile.followersCount),
       isVerified: Boolean(profile.verified ?? profile.isVerified ?? false),
-      recentPosts: recentPosts.slice(0, 6).map(
+      recentPosts: recentPosts.slice(0, MAX_RECENT_POSTS).map(
         (post): RawInstagramPost => ({
           imageUrl: post.imageUrl,
           caption: post.caption,
@@ -399,7 +400,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.token}`,
         },
-        body: JSON.stringify({ usernames: [handle], resultsLimit: 12 }),
+        body: JSON.stringify({ usernames: [handle], resultsLimit: MAX_RECENT_POSTS }),
         signal: controller.signal,
       });
 

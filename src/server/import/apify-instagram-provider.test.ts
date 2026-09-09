@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApifyInstagramProvider } from "./apify-instagram-provider";
 import { InstagramProviderError } from "./errors";
+import { MAX_RECENT_POSTS } from "./provider-types";
 
 const SAMPLE_ITEM = {
   username: "almaty.boutique",
@@ -84,6 +85,51 @@ describe("ApifyInstagramProvider", () => {
     expect(raw.highlights).toHaveLength(1);
     expect(raw.postsCount).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests the actor's maximum stable post count", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([SAMPLE_ITEM]));
+    await createProvider().fetchProfile(REQUEST);
+
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body) as {
+      resultsLimit: number;
+    };
+    expect(body.resultsLimit).toBe(MAX_RECENT_POSTS);
+    expect(MAX_RECENT_POSTS).toBeGreaterThanOrEqual(12);
+  });
+
+  it("imports up to MAX_RECENT_POSTS posts and preserves their metadata", async () => {
+    const manyPosts = Array.from({ length: MAX_RECENT_POSTS + 5 }, (_, i) => ({
+      id: String(i),
+      shortCode: `code${i}`,
+      caption: `post ${i}`,
+      likesCount: i,
+      commentsCount: i,
+      timestamp: "2026-01-01T00:00:00Z",
+      url: `https://instagram.com/p/code${i}`,
+      type: "Video",
+      videoUrl: "https://cdn.example/v.mp4",
+      hashtags: ["almaty", "sale"],
+      mentions: ["brand"],
+      taggedUsers: [{ username: "partner" }],
+      displayUrl: "https://cdn.example/i.jpg",
+      dimensionsWidth: 1080,
+      dimensionsHeight: 1080,
+    }));
+    fetchMock.mockResolvedValue(jsonResponse([{ ...SAMPLE_ITEM, latestPosts: manyPosts }]));
+
+    const result = await createProvider().fetchProfile(REQUEST);
+
+    // Capped at the actor's stable ceiling, not the old 6.
+    expect(result.recentPosts).toHaveLength(MAX_RECENT_POSTS);
+    // All rich metadata is preserved on the imported posts.
+    const post = result.recentPosts[0]!;
+    expect(post.type).toBe("Video");
+    expect(post.videoUrl).toBe("https://cdn.example/v.mp4");
+    expect(post.hashtags).toEqual(["almaty", "sale"]);
+    expect(post.mentions).toEqual(["brand"]);
+    expect(post.taggedUsers).toEqual(["partner"]);
+    expect(post.dimensions).toEqual({ width: 1080, height: 1080 });
   });
 
   it("normalizes a slash actor id to the tilde form in the request URL", async () => {
