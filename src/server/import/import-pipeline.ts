@@ -2,16 +2,17 @@ import "server-only";
 
 import { Prisma, type ImportJob } from "@prisma/client";
 
-import { getAiCategoryProvider } from "@/lib/ai-category-provider";
 import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
-  detectAutoCategories,
   EMPTY_OVERRIDES,
+  type HybridDetectionResult,
   mergeCategories,
+  runHybridDetection,
 } from "@/lib/category-pipeline";
 import { prisma } from "@/lib/prisma";
-import type { BoutiquePreview, DetectedCategory, ImportJobDTO } from "@/types";
+import { resolveAiCategoryProvider } from "@/server/ai/gemini-category-provider";
+import type { BoutiqueEnrichment, BoutiquePreview, ImportJobDTO } from "@/types";
 import { slugify } from "@/utils/format";
 
 import { ImportStateError } from "./errors";
@@ -39,17 +40,20 @@ function toDetectionInput(profile: RawInstagramProfile): CategoryDetectionInput 
 }
 
 /**
- * Normalizes a raw provider profile into a boutique draft. Category detection is
- * done by the pipeline (Stages 1–2) and passed in as `autoDetected`; the primary
- * (highest-scoring) label doubles as the single `category` value so existing
- * surfaces keep working, and the full scored result is kept as categoryScores.
- * Manual overrides (Stage 3) are applied later, at persist time.
+ * Normalizes a raw provider profile into a boutique draft. Hybrid detection
+ * (keyword → AI) is done upstream and passed in as `detection`; the merged
+ * auto-detected list drives `category`/`productCategories`/`categoryScores`,
+ * while the keyword-only result and the raw AI result are kept SEPARATELY
+ * (keywordScores, aiResult) so we always know each stage's output. Manual
+ * overrides (Stage 3) are applied later, at persist time.
  */
 export function mapProfileToPreview(
   profile: RawInstagramProfile,
-  autoDetected: DetectedCategory[],
+  detection: HybridDetectionResult,
+  enrichment: BoutiqueEnrichment,
+  aiRan: boolean,
 ): BoutiquePreview {
-  const productCategories = autoDetected.map(({ id, label }) => ({ id, label }));
+  const productCategories = detection.autoDetected.map(({ id, label }) => ({ id, label }));
 
   return {
     name: profile.fullName?.trim() || profile.handle,
@@ -63,14 +67,11 @@ export function mapProfileToPreview(
     isVerified: profile.isVerified,
     category: productCategories[0]?.label ?? null,
     productCategories,
-    categoryScores: autoDetected,
-    // Enrichment: structured business info derived from the same imported data.
-    enrichment: enrichBoutique({
-      biography: profile.biography,
-      externalUrl: profile.externalUrl,
-      externalUrls: profile.externalUrls,
-      businessAddress: profile.businessAddress,
-    }),
+    categoryScores: detection.autoDetected,
+    keywordScores: detection.keyword,
+    // Persist the AI result only when a real provider ran; null means "no AI".
+    aiResult: aiRan ? detection.ai : undefined,
+    enrichment,
     city: null,
     recentPosts: profile.recentPosts.slice(0, MAX_RECENT_POSTS),
     isBusinessAccount: profile.isBusinessAccount,
@@ -125,12 +126,23 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       url: job.sourceUrl,
       handle: job.handle ?? "",
     });
-    // Run the category pipeline's detection stages: keyword → AI (disabled until
-    // a provider is wired) → image (hook). Results are merged by the pipeline.
-    const autoDetected = await detectAutoCategories(toDetectionInput(profile), {
-      aiProvider: getAiCategoryProvider(),
+    // Hybrid detection: Keyword Engine → Gemini AI (disabled unless GEMINI_API_KEY
+    // is set). Enrichment is computed once and shared as AI context + persistence.
+    const detectionInput = toDetectionInput(profile);
+    const enrichment = enrichBoutique({
+      biography: profile.biography,
+      externalUrl: profile.externalUrl,
+      externalUrls: profile.externalUrls,
+      businessAddress: profile.businessAddress,
     });
-    const preview = mapProfileToPreview(profile, autoDetected);
+    const aiProvider = resolveAiCategoryProvider();
+    const detection = await runHybridDetection(detectionInput, { aiProvider, enrichment });
+    const preview = mapProfileToPreview(
+      profile,
+      detection,
+      enrichment,
+      aiProvider.name !== "disabled",
+    );
 
     return await prisma.importJob.update({
       where: { id: jobId },
@@ -194,6 +206,8 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       category: primaryCategory,
       productCategories: finalCategoryIds,
       categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
+      keywordScores: (preview.keywordScores ?? []) as unknown as Prisma.InputJsonValue,
+      aiResult: jsonOrDbNull(preview.aiResult),
       enrichment: jsonOrDbNull(preview.enrichment),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,
@@ -221,6 +235,8 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
       category: primaryCategory,
       productCategories: finalCategoryIds,
       categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
+      keywordScores: (preview.keywordScores ?? []) as unknown as Prisma.InputJsonValue,
+      aiResult: jsonOrDbNull(preview.aiResult),
       enrichment: jsonOrDbNull(preview.enrichment),
       followersCount: preview.followersCount,
       externalUrl: preview.externalUrl,

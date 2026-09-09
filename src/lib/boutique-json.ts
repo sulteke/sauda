@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { type AiCategoryResult, parseAiCategoryResult } from "@/lib/ai-category-provider";
 import { EMPTY_ENRICHMENT } from "@/lib/boutique-enrichment";
 import type {
   BoutiqueEnrichment,
@@ -51,4 +52,10 @@ export function parseCategoryScores(
 export function parseEnrichment(value: Prisma.JsonValue | null | undefined): BoutiqueEnrichment {
   if (!value || typeof value !== "object" || Array.isArray(value)) return EMPTY_ENRICHMENT;
   return { ...EMPTY_ENRICHMENT, ...(value as unknown as Partial<BoutiqueEnrichment>) };
+}
+
+/** Parses the stored raw AI result (reuses the provider's strict parser); null when absent. */
+export function parseAiResult(value: Prisma.JsonValue | null | undefined): AiCategoryResult | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  return parseAiCategoryResult(value);
 }

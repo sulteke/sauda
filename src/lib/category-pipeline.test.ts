@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DetectedCategory } from "@/types/category";
 
-import type { AiCategoryProvider, AiCategoryResult } from "./ai-category-provider";
+import { type AiCategoryProvider, type AiCategoryResult, EMPTY_AI_RESULT } from "./ai-category-provider";
 import {
   applyCorrection,
   type CategoryDetectionInput,
@@ -13,13 +13,14 @@ import {
   mergeCategories,
   noopImageClassifier,
   runCategoryPipeline,
+  runHybridDetection,
 } from "./category-pipeline";
 
 /** Builds a fake AI provider returning a fixed result — no model involved. */
 const fakeAiProvider = (result: Partial<AiCategoryResult>): AiCategoryProvider => ({
   name: "fake",
   async analyze() {
-    return { categories: [], city: null, mall: null, address: null, summary: null, ...result };
+    return { ...EMPTY_AI_RESULT, ...result };
   },
 });
 
@@ -126,7 +127,7 @@ describe("AI category stage", () => {
       name: "spy",
       async analyze(req) {
         seen = req;
-        return { categories: [], city: null, mall: null, address: null, summary: null };
+        return { ...EMPTY_AI_RESULT };
       },
     };
     await createAiCategoryStage(provider).detect({
@@ -149,6 +150,72 @@ describe("AI category stage", () => {
     });
     // Allowed categories are always provided so the model cannot invent ids.
     expect((seen as { allowedCategories: unknown[] }).allowedCategories.length).toBeGreaterThan(0);
+    // Keyword results + enrichment are passed as prior context.
+    expect(seen).toHaveProperty("keywordResults");
+    expect(seen).toHaveProperty("enrichment");
+  });
+});
+
+describe("runHybridDetection", () => {
+  it("returns keyword, raw AI, and merged results separately from ONE AI call", async () => {
+    let calls = 0;
+    const provider: AiCategoryProvider = {
+      name: "fake",
+      async analyze() {
+        calls += 1;
+        return {
+          ...EMPTY_AI_RESULT,
+          categories: [{ id: "obuv", confidence: 92, reason: "sells shoes" }],
+          city: "Алматы",
+          priceSegment: "mid",
+          style: "streetwear",
+          summary: "Almaty sneaker shop",
+        };
+      },
+    };
+
+    const result = await runHybridDetection(input("магазин джинсы"), { aiProvider: provider });
+
+    expect(calls).toBe(1); // exactly one AI call
+    // Keyword result preserved on its own.
+    expect(result.keyword.map((c) => c.id)).toContain("dzhinsy");
+    // Raw AI result preserved in full (profiling fields included).
+    expect(result.ai.city).toBe("Алматы");
+    expect(result.ai.priceSegment).toBe("mid");
+    expect(result.ai.categories[0]?.id).toBe("obuv");
+    // Merged = keyword + validated AI.
+    const mergedIds = result.autoDetected.map((c) => c.id);
+    expect(mergedIds).toContain("dzhinsy");
+    expect(mergedIds).toContain("obuv");
+  });
+
+  it("drops invented ids and low-confidence AI suggestions from the merge", async () => {
+    const provider: AiCategoryProvider = {
+      name: "fake",
+      async analyze() {
+        return {
+          ...EMPTY_AI_RESULT,
+          categories: [
+            { id: "obuv", confidence: 80, reason: "ok" },
+            { id: "not-real", confidence: 99, reason: "invented" },
+            { id: "hudi", confidence: 20, reason: "weak" },
+          ],
+        };
+      },
+    };
+    const result = await runHybridDetection(input(null), { aiProvider: provider });
+    const ids = result.autoDetected.map((c) => c.id);
+    expect(ids).toContain("obuv");
+    expect(ids).not.toContain("not-real");
+    expect(ids).not.toContain("hudi");
+    // The raw AI result still records what the model said (pre-validation).
+    expect(result.ai.categories).toHaveLength(3);
+  });
+
+  it("falls back to the disabled provider (keyword only) when none is given", async () => {
+    const result = await runHybridDetection(input("магазин джинсы"));
+    expect(result.ai.categories).toEqual([]);
+    expect(result.autoDetected.map((c) => c.id)).toContain("dzhinsy");
   });
 });
 

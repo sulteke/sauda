@@ -4,6 +4,7 @@ import { Prisma, type Boutique } from "@prisma/client";
 
 import type { BoutiqueInput, BoutiqueUpdate } from "@/features/boutiques/schemas";
 import {
+  parseAiResult,
   parseBusinessAddress,
   parseCategoryScores,
   parseEnrichment,
@@ -31,6 +32,8 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
     categoryScores: parseCategoryScores(row.categoryScores),
+    keywordScores: parseCategoryScores(row.keywordScores),
+    aiResult: parseAiResult(row.aiResult),
     manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
     manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
     enrichment: parseEnrichment(row.enrichment),

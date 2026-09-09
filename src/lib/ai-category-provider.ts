@@ -1,18 +1,23 @@
-import type { ProductCategory } from "@/types/category";
+import type { DetectedCategory, ProductCategory } from "@/types/category";
+import type { BoutiqueEnrichment } from "@/types/enrichment";
 import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
 
 /**
- * AI category stage — provider abstraction ONLY.
+ * AI category stage — provider abstraction.
  *
- * This file defines the seam for an LLM-backed category analyzer (OpenAI /
- * Gemini / Claude). It does NOT call any model. A concrete provider implements
- * `AiCategoryProvider.analyze`, typically by feeding `buildAiCategoryPrompt` to
- * a model and passing the model's reply through `parseAiCategoryResult`.
+ * This file defines the seam for an LLM-backed category analyzer (Gemini today;
+ * OpenAI/Claude later). It does NOT call any model itself. A concrete provider
+ * implements `AiCategoryProvider.analyze`, typically by feeding
+ * `buildAiCategoryPrompt` to a model and passing the reply through
+ * `parseAiCategoryResult`.
  *
- * Hard rules enforced in code (never trust the model):
+ * Hard rules, enforced in code (never trust the model):
  *  - the AI may ONLY choose from the allowed internal categories — invented ids
- *    are dropped downstream in the pipeline stage;
+ *    are dropped in the pipeline;
  *  - a suggestion below the confidence threshold is ignored.
+ *
+ * The keyword engine runs FIRST and is passed to the AI as context: the AI
+ * validates/extends it, it never replaces it.
  */
 
 /** Minimum confidence (0–100) for an AI suggestion to count. */
@@ -31,6 +36,10 @@ export interface AiCategoryRequest {
   mentions: string[];
   /** The ONLY categories the AI may choose from. */
   allowedCategories: ProductCategory[];
+  /** Keyword-engine results, given as strong prior context (validate/extend). */
+  keywordResults?: DetectedCategory[];
+  /** Structured enrichment already derived from the same data. */
+  enrichment?: BoutiqueEnrichment;
 }
 
 /** One AI-suggested category. `id` must be one of the allowed category ids. */
@@ -47,6 +56,9 @@ export interface AiCategoryResult {
   city: string | null;
   mall: string | null;
   address: string | null;
+  targetAudience: string | null;
+  priceSegment: string | null;
+  style: string | null;
   summary: string | null;
 }
 
@@ -55,68 +67,80 @@ export const EMPTY_AI_RESULT: AiCategoryResult = {
   city: null,
   mall: null,
   address: null,
+  targetAudience: null,
+  priceSegment: null,
+  style: null,
   summary: null,
 };
 
 /**
- * The pluggable seam. Implement this with OpenAI/Gemini/Claude later and wire it
- * via `getAiCategoryProvider()` — nothing in the pipeline changes.
+ * The pluggable seam. Implement this with Gemini/OpenAI/Claude and wire it via a
+ * server-only resolver — nothing in the pipeline changes.
  */
 export interface AiCategoryProvider {
   readonly name: string;
   analyze(request: AiCategoryRequest): Promise<AiCategoryResult>;
 }
 
-/** Default provider: no model connected yet, so it contributes nothing. */
+/** Default provider: no model connected, so it contributes nothing. */
 export const disabledAiCategoryProvider: AiCategoryProvider = {
   name: "disabled",
   async analyze() {
-    return { categories: [], city: null, mall: null, address: null, summary: null };
+    return { ...EMPTY_AI_RESULT };
   },
 };
 
 /**
- * Resolves the active AI category provider. Returns the disabled provider until
- * a real one is implemented and selected here (e.g. via an env flag). This is
- * the single place a future OpenAI/Gemini/Claude provider gets plugged in.
+ * Pure default resolver — always the disabled provider. The real, env-gated
+ * resolver lives in the server-only provider module (it may construct a model
+ * client), and falls back to this when no API key is configured.
  */
 export function getAiCategoryProvider(): AiCategoryProvider {
   return disabledAiCategoryProvider;
 }
 
 /**
- * Builds the instruction text a concrete provider would send to its model. Lists
- * the allowed categories, the strict JSON schema, and the hard rules. Ready to
- * use but not sent anywhere by this module.
+ * Builds the instruction text a concrete provider sends to its model. Lists the
+ * allowed categories, the keyword-engine results (as prior context), the
+ * enrichment, the strict JSON schema, and the hard rules.
  */
 export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
   const allowed = request.allowedCategories.map((c) => `- ${c.id} (${c.label})`).join("\n");
+  const keyword =
+    request.keywordResults && request.keywordResults.length > 0
+      ? request.keywordResults.map((k) => `- ${k.id} (score ${k.score})`).join("\n")
+      : "(none)";
   const data = JSON.stringify(
     {
       businessName: request.businessName,
       username: request.username,
       biography: request.biography,
-      externalUrl: request.externalUrl,
-      externalUrls: request.externalUrls,
+      website: request.externalUrl,
+      externalLinks: request.externalUrls,
       businessAddress: request.businessAddress,
       captions: request.captions,
       hashtags: request.hashtags,
       mentions: request.mentions,
+      enrichment: request.enrichment ?? null,
     },
     null,
     2,
   );
 
   return [
-    "You classify an Instagram business into product categories.",
-    "Choose ONLY from the allowed category ids below. Never invent a category id.",
+    "You classify an Instagram clothing/retail business into product categories and profile it.",
+    "Choose category ids ONLY from the allowed list below. Never invent a category id.",
     `Include a category ONLY if your confidence is ${AI_CONFIDENCE_THRESHOLD} or higher (scale 0-100). If none qualify, return an empty "categories" array.`,
-    "Respond with STRICT JSON only — no markdown, no commentary — matching exactly this schema:",
-    '{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}],"city":"...","mall":"...","address":"...","summary":"..."}',
-    "Use null for city, mall, address or summary when unknown.",
+    "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — do not classify from scratch and do not discard a clearly-correct keyword result.",
+    "Respond with STRICT JSON only. No markdown, no code fences, no commentary, no extra fields. Match EXACTLY this schema:",
+    '{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}],"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."}',
+    "Use null (not empty string) for city, mall, address, targetAudience, priceSegment, style or summary when unknown.",
     "",
     "Allowed categories:",
     allowed,
+    "",
+    "Keyword engine results (prior context):",
+    keyword,
     "",
     "Business data (text only):",
     data,
@@ -130,8 +154,8 @@ function toStringOrNull(value: unknown): string | null {
 /**
  * Safely parses a model reply (JSON string or already-parsed object) into a
  * well-formed `AiCategoryResult`. Never throws — malformed input yields an empty
- * result, and malformed category entries are dropped. Does NOT apply the
- * allowed-id / confidence rules (the pipeline stage enforces those uniformly).
+ * result, malformed category entries are dropped, extra fields are ignored. Does
+ * NOT apply the allowed-id / confidence rules (the pipeline enforces those).
  */
 export function parseAiCategoryResult(raw: unknown): AiCategoryResult {
   let parsed: unknown = raw;
@@ -168,6 +192,9 @@ export function parseAiCategoryResult(raw: unknown): AiCategoryResult {
     city: toStringOrNull(obj.city),
     mall: toStringOrNull(obj.mall),
     address: toStringOrNull(obj.address),
+    targetAudience: toStringOrNull(obj.targetAudience),
+    priceSegment: toStringOrNull(obj.priceSegment),
+    style: toStringOrNull(obj.style),
     summary: toStringOrNull(obj.summary),
   };
 }

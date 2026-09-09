@@ -1,3 +1,5 @@
+import type { AiCategoryResult } from "@/lib/ai-category-provider";
+
 import type { DetectedCategory, ProductCategory } from "./category";
 import type { BoutiqueEnrichment } from "./enrichment";
 import type {
@@ -57,8 +59,12 @@ export interface BoutiqueDTO {
   category: string | null;
   /** Final product categories (auto-detected + manual adds − manual removes), richest-first. */
   productCategories: ProductCategory[];
-  /** Auto-detected scored breakdown with match evidence (Stages 1–2; the "why"). */
+  /** Final (keyword + AI) scored breakdown with evidence — the merged "why". */
   categoryScores: DetectedCategory[];
+  /** Keyword-engine result only, kept separate so keyword evidence is never overwritten. */
+  keywordScores: DetectedCategory[];
+  /** Raw AI provider result (null when no AI ran). */
+  aiResult: AiCategoryResult | null;
   /** Categories an admin added by hand (Stage 3). */
   manualCategoriesAdded: ProductCategory[];
   /** Categories an admin removed by hand (Stage 3). */

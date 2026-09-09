@@ -3,6 +3,7 @@ import "server-only";
 import type { Boutique, Prisma } from "@prisma/client";
 
 import {
+  parseAiResult,
   parseBusinessAddress,
   parseCategoryScores,
   parseEnrichment,
@@ -34,6 +35,8 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     category: row.category,
     productCategories: resolveProductCategories(row.productCategories),
     categoryScores: parseCategoryScores(row.categoryScores),
+    keywordScores: parseCategoryScores(row.keywordScores),
+    aiResult: parseAiResult(row.aiResult),
     manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
     manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
     enrichment: parseEnrichment(row.enrichment),

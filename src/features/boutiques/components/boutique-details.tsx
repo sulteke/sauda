@@ -302,6 +302,55 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
         </Card>
       ) : null}
 
+      {boutique.aiResult ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <h2 className="text-lg font-semibold tracking-tight">AI insights</h2>
+            <p className="text-xs text-muted-foreground">
+              From the AI analyzer — separate from keyword detection.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {boutique.aiResult.categories.length > 0 ? (
+              <ul className="space-y-1">
+                {boutique.aiResult.categories.map((c) => (
+                  <li key={c.id} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                    <Badge variant="secondary">{c.id}</Badge>
+                    <span className="text-xs text-muted-foreground">confidence {c.confidence}</span>
+                    {c.reason ? (
+                      <span className="text-xs text-muted-foreground">· {c.reason}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm italic text-muted-foreground">No AI categories.</p>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {(
+                [
+                  ["Target audience", boutique.aiResult.targetAudience],
+                  ["Price segment", boutique.aiResult.priceSegment],
+                  ["Style", boutique.aiResult.style],
+                  ["City", boutique.aiResult.city],
+                  ["Mall", boutique.aiResult.mall],
+                  ["Address", boutique.aiResult.address],
+                ] as const
+              )
+                .filter(([, value]) => Boolean(value))
+                .map(([label, value]) => (
+                  <InfoRow key={label} icon={Tag} label={label}>
+                    {value}
+                  </InfoRow>
+                ))}
+            </div>
+            {boutique.aiResult.summary ? (
+              <p className="max-w-2xl text-sm text-foreground">{boutique.aiResult.summary}</p>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
       <section className="space-y-3">
         <h2 className="text-lg font-semibold tracking-tight">Recent posts</h2>
         {posts.length > 0 ? (

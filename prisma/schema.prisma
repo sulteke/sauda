@@ -56,8 +56,13 @@ model Boutique {
   category       String?
   /// Final product-category ids: auto-detected, plus manual adds, minus manual removes.
   productCategories String[]    @default([]) @map("product_categories")
-  /// Auto-detected scored breakdown + match evidence (Stages 1–2; the "why").
+  /// Final auto-detected (keyword + AI) scored breakdown + evidence — the merged "why".
   categoryScores Json?          @map("category_scores")
+  /// Keyword-engine result only, kept separate so keyword evidence is never overwritten.
+  keywordScores Json?           @map("keyword_scores")
+  /// Raw AI provider result (categories + confidence + reasons, city, mall, address,
+  /// targetAudience, priceSegment, style, summary). Null when no AI ran.
+  aiResult      Json?           @map("ai_result")
   /// Category ids an admin added by hand (Stage 3).
   manualCategoriesAdded String[] @default([]) @map("manual_categories_added")
   /// Category ids an admin removed by hand (Stage 3).

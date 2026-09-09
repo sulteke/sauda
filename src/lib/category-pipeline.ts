@@ -1,12 +1,15 @@
 import type { CategoryMatch, DetectedCategory, ProductCategory } from "@/types/category";
+import type { BoutiqueEnrichment } from "@/types/enrichment";
 import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
 
 import {
   type AiCategoryProvider,
   AI_CONFIDENCE_THRESHOLD,
   type AiCategoryRequest,
+  type AiCategoryResult,
   disabledAiCategoryProvider,
 } from "./ai-category-provider";
+import { enrichBoutique } from "./boutique-enrichment";
 import {
   categoryLabel,
   DEFAULT_ENGINE_CONFIG,
@@ -133,8 +136,27 @@ export function createImageStage(
 
 const uniqStrings = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
 
-/** Builds the AI request (text only) from the pipeline input + allowed categories. */
-function toAiRequest(input: CategoryDetectionInput, config: EngineConfig): AiCategoryRequest {
+/** Derives keyword-stage text input from the full detection input. */
+function toKeywordInput(input: CategoryDetectionInput) {
+  return {
+    biography: input.biography,
+    posts: input.posts.map((p) => ({
+      caption: p.caption,
+      hashtags: p.hashtags,
+      mentions: p.mentions,
+    })),
+  };
+}
+
+/**
+ * Builds the AI request (text only) from the pipeline input + allowed categories,
+ * plus the keyword results and enrichment as prior context.
+ */
+function toAiRequest(
+  input: CategoryDetectionInput,
+  config: EngineConfig,
+  context: { keywordResults: DetectedCategory[]; enrichment: BoutiqueEnrichment },
+): AiCategoryRequest {
   return {
     businessName: input.businessName ?? null,
     username: input.username ?? null,
@@ -148,15 +170,68 @@ function toAiRequest(input: CategoryDetectionInput, config: EngineConfig): AiCat
     hashtags: uniqStrings(input.posts.flatMap((p) => p.hashtags ?? [])),
     mentions: uniqStrings(input.posts.flatMap((p) => p.mentions ?? [])),
     allowedCategories: config.dictionary.map(({ id, label }) => ({ id, label })),
+    keywordResults: context.keywordResults,
+    enrichment: context.enrichment,
   };
 }
 
+/** Enrichment derived from the detection input (reuses the enrichment engine). */
+function enrichmentFromInput(input: CategoryDetectionInput): BoutiqueEnrichment {
+  return enrichBoutique({
+    biography: input.biography,
+    externalUrl: input.externalUrl ?? null,
+    externalUrls: input.externalUrls ?? [],
+    businessAddress: input.businessAddress ?? null,
+  });
+}
+
 /**
- * AI detection stage. Wraps an AiCategoryProvider, then enforces the hard rules
- * in code regardless of what the model returns: invented category ids are
- * dropped, and suggestions below the confidence threshold are ignored. Valid
- * suggestions become DetectedCategory entries (score = confidence) so they merge
- * uniformly with the keyword stage. Defaults to the disabled provider.
+ * Validates a raw AI result into DetectedCategory entries. Enforces the hard
+ * rules regardless of the model: invented ids are dropped (must be an internal
+ * category) and suggestions below the confidence threshold are ignored. Score =
+ * confidence, so AI results merge uniformly with the keyword stage.
+ */
+export function aiSuggestionsToDetected(
+  result: AiCategoryResult,
+  config: EngineConfig = DEFAULT_ENGINE_CONFIG,
+): DetectedCategory[] {
+  const byId = new Map<string, DetectedCategory>();
+  for (const suggestion of result.categories) {
+    const label = categoryLabel(suggestion.id, config);
+    if (!label) continue; // reject invented ids
+    if (!(suggestion.confidence >= AI_CONFIDENCE_THRESHOLD)) continue; // below threshold
+    const score = Math.round(Math.max(0, Math.min(100, suggestion.confidence)));
+    const existing = byId.get(suggestion.id);
+    if (!existing || score > existing.score) {
+      byId.set(suggestion.id, { id: suggestion.id, label, score, matches: [] });
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Merges several detection result lists by id (sums scores, concatenates evidence). */
+function mergeDetected(lists: DetectedCategory[][]): DetectedCategory[] {
+  const byId = new Map<string, DetectedCategory>();
+  for (const list of lists) {
+    for (const result of list) {
+      const existing = byId.get(result.id);
+      if (existing) {
+        existing.score += result.score;
+        existing.matches = [...existing.matches, ...result.matches];
+      } else {
+        byId.set(result.id, { ...result, matches: [...result.matches] });
+      }
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+}
+
+/**
+ * AI detection stage. Wraps an AiCategoryProvider and converts its output into
+ * DetectedCategory entries (see `aiSuggestionsToDetected`). The keyword results
+ * and enrichment are computed here and passed as prior context so the model
+ * validates/extends the keyword engine rather than classifying from scratch.
+ * Defaults to the disabled provider.
  */
 export function createAiCategoryStage(
   provider: AiCategoryProvider = disabledAiCategoryProvider,
@@ -165,19 +240,13 @@ export function createAiCategoryStage(
   return {
     name: "ai",
     detect: async (input) => {
-      const result = await provider.analyze(toAiRequest(input, config));
-      const byId = new Map<string, DetectedCategory>();
-      for (const suggestion of result.categories) {
-        const label = categoryLabel(suggestion.id, config);
-        if (!label) continue; // reject invented ids — must be an internal category
-        if (!(suggestion.confidence >= AI_CONFIDENCE_THRESHOLD)) continue; // below threshold
-        const score = Math.round(Math.max(0, Math.min(100, suggestion.confidence)));
-        const existing = byId.get(suggestion.id);
-        if (!existing || score > existing.score) {
-          byId.set(suggestion.id, { id: suggestion.id, label, score, matches: [] });
-        }
-      }
-      return [...byId.values()];
+      const keywordResults = detectCategories(toKeywordInput(input), config);
+      const request = toAiRequest(input, config, {
+        keywordResults,
+        enrichment: enrichmentFromInput(input),
+      });
+      const result = await provider.analyze(request);
+      return aiSuggestionsToDetected(result, config);
     },
   };
 }
@@ -205,21 +274,49 @@ export async function detectAutoCategories(
     createImageStage(options.imageClassifier),
   ];
 
-  const byId = new Map<string, DetectedCategory>();
-  for (const stage of stages) {
-    const results = await stage.detect(input);
-    for (const result of results) {
-      const existing = byId.get(result.id);
-      if (existing) {
-        existing.score += result.score;
-        existing.matches = [...existing.matches, ...result.matches];
-      } else {
-        byId.set(result.id, { ...result, matches: [...result.matches] });
-      }
-    }
-  }
+  const lists = await Promise.all(stages.map((stage) => stage.detect(input)));
+  return mergeDetected(lists);
+}
 
-  return [...byId.values()].sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+/** A hybrid run's outputs, kept separate so keyword, AI and merged are all known. */
+export interface HybridDetectionResult {
+  /** Keyword engine result only (with match evidence) — never overwritten. */
+  keyword: DetectedCategory[];
+  /** Raw AI provider result (full structured output). */
+  ai: AiCategoryResult;
+  /** Final auto-detected list: keyword + validated AI, merged. */
+  autoDetected: DetectedCategory[];
+}
+
+export interface HybridDetectionOptions {
+  config?: EngineConfig;
+  aiProvider?: AiCategoryProvider;
+  /** Enrichment to pass to the AI as context (derived from the input if omitted). */
+  enrichment?: BoutiqueEnrichment;
+}
+
+/**
+ * Runs the hybrid pipeline — Keyword Engine → AI — with a SINGLE AI call, and
+ * returns the keyword result, the raw AI result, and the merged auto-detected
+ * list separately. The AI validates/extends the keyword engine; it never
+ * replaces it. Used by the import pipeline so all three can be persisted.
+ */
+export async function runHybridDetection(
+  input: CategoryDetectionInput,
+  options: HybridDetectionOptions = {},
+): Promise<HybridDetectionResult> {
+  const config = options.config ?? DEFAULT_ENGINE_CONFIG;
+  const provider = options.aiProvider ?? disabledAiCategoryProvider;
+
+  const keyword = detectCategories(toKeywordInput(input), config);
+  const enrichment = options.enrichment ?? enrichmentFromInput(input);
+  const request = toAiRequest(input, config, { keywordResults: keyword, enrichment });
+
+  const ai = await provider.analyze(request);
+  const aiDetected = aiSuggestionsToDetected(ai, config);
+  const autoDetected = mergeDetected([keyword, aiDetected]);
+
+  return { keyword, ai, autoDetected };
 }
 
 // ---------------------------------------------------------------------------

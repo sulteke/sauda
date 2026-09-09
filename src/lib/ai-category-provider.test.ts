@@ -7,6 +7,7 @@ import {
   type AiCategoryRequest,
   buildAiCategoryPrompt,
   disabledAiCategoryProvider,
+  EMPTY_AI_RESULT,
   getAiCategoryProvider,
   parseAiCategoryResult,
 } from "./ai-category-provider";
@@ -32,13 +33,7 @@ const request = (): AiCategoryRequest => ({
 describe("disabled AI provider", () => {
   it("is the default provider and contributes nothing", async () => {
     expect(getAiCategoryProvider()).toBe(disabledAiCategoryProvider);
-    await expect(disabledAiCategoryProvider.analyze(request())).resolves.toEqual({
-      categories: [],
-      city: null,
-      mall: null,
-      address: null,
-      summary: null,
-    });
+    await expect(disabledAiCategoryProvider.analyze(request())).resolves.toEqual(EMPTY_AI_RESULT);
   });
 });
 
@@ -51,19 +46,42 @@ describe("buildAiCategoryPrompt", () => {
     expect(prompt).toContain(String(AI_CONFIDENCE_THRESHOLD));
     expect(prompt).toContain("Never invent");
     expect(prompt).toContain('"categories"');
+    // Expanded schema + validate/extend instruction.
+    expect(prompt).toContain("targetAudience");
+    expect(prompt).toContain("priceSegment");
+    expect(prompt).toContain("style");
+    expect(prompt).toContain("Validate or EXTEND");
+  });
+
+  it("includes keyword-engine results as prior context", () => {
+    const prompt = buildAiCategoryPrompt({
+      ...request(),
+      keywordResults: [{ id: "hudi", label: "Худи", score: 9, matches: [] }],
+    });
+    expect(prompt).toContain("Keyword engine results");
+    expect(prompt).toContain("hudi (score 9)");
   });
 });
 
 describe("parseAiCategoryResult", () => {
-  it("parses a strict JSON string", () => {
+  it("parses a strict JSON string incl. the profiling fields", () => {
     const json =
-      '{"categories":[{"id":"hudi","confidence":80,"reason":"hoodies"}],"city":"Алматы","mall":null,"address":"Абая 89","summary":"menswear"}';
+      '{"categories":[{"id":"hudi","confidence":80,"reason":"hoodies"}],"city":"Алматы","mall":null,"address":"Абая 89","targetAudience":"men 18-30","priceSegment":"mid","style":"streetwear","summary":"menswear"}';
     const result = parseAiCategoryResult(json);
     expect(result.categories).toEqual([{ id: "hudi", confidence: 80, reason: "hoodies" }]);
     expect(result.city).toBe("Алматы");
     expect(result.address).toBe("Абая 89");
     expect(result.mall).toBeNull();
+    expect(result.targetAudience).toBe("men 18-30");
+    expect(result.priceSegment).toBe("mid");
+    expect(result.style).toBe("streetwear");
     expect(result.summary).toBe("menswear");
+  });
+
+  it("ignores unexpected extra fields", () => {
+    const result = parseAiCategoryResult({ categories: [], city: "Астана", bogus: "x", extra: 1 });
+    expect(result.city).toBe("Астана");
+    expect(result).not.toHaveProperty("bogus");
   });
 
   it("accepts an already-parsed object", () => {
@@ -88,13 +106,7 @@ describe("parseAiCategoryResult", () => {
   });
 
   it("returns an empty result for malformed input", () => {
-    expect(parseAiCategoryResult("not json")).toEqual({
-      categories: [],
-      city: null,
-      mall: null,
-      address: null,
-      summary: null,
-    });
+    expect(parseAiCategoryResult("not json")).toEqual(EMPTY_AI_RESULT);
     expect(parseAiCategoryResult(42).categories).toEqual([]);
     expect(parseAiCategoryResult(null).categories).toEqual([]);
   });

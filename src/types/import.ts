@@ -1,3 +1,5 @@
+import type { AiCategoryResult } from "@/lib/ai-category-provider";
+
 import type { BoutiquePost } from "./boutique";
 import type { DetectedCategory, ProductCategory } from "./category";
 import type { BoutiqueEnrichment } from "./enrichment";
@@ -26,8 +28,12 @@ export interface BoutiquePreview {
   category: string | null;
   /** All auto-detected product categories, richest-first (absent on legacy previews). */
   productCategories?: ProductCategory[];
-  /** Full scored detection breakdown with match evidence (absent on legacy previews). */
+  /** Final (keyword + AI) scored breakdown with evidence (absent on legacy previews). */
   categoryScores?: DetectedCategory[];
+  /** Keyword-engine result only (absent on legacy previews). */
+  keywordScores?: DetectedCategory[];
+  /** Raw AI provider result (absent on legacy previews / when no AI ran). */
+  aiResult?: AiCategoryResult;
   /** Structured business info derived from the imported data (absent on legacy previews). */
   enrichment?: BoutiqueEnrichment;
   city: string | null;
