@@ -69,6 +69,9 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const startedAt = Date.now();
 
+    // TEMP debug logging — remove later.
+    logger.info("gemini.debug.request_started", { provider: this.name, model: this.model });
+
     try {
       const response = await fetch(this.endpoint(), {
         method: "POST",
@@ -82,7 +85,22 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 
       const durationMs = Date.now() - startedAt;
 
+      // TEMP debug logging — remove later.
+      logger.info("gemini.debug.request_finished", {
+        provider: this.name,
+        model: this.model,
+        status: response.status,
+        durationMs,
+      });
+
       if (!response.ok) {
+        // TEMP debug logging — remove later.
+        logger.info("gemini.debug.request_failed", {
+          provider: this.name,
+          model: this.model,
+          status: response.status,
+          durationMs,
+        });
         // Never log the URL/key — only safe metadata.
         logger.warn("gemini.request_failed", {
           provider: this.name,
@@ -112,6 +130,13 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 
       return result;
     } catch (error) {
+      // TEMP debug logging — remove later.
+      logger.info("gemini.debug.request_failed", {
+        provider: this.name,
+        model: this.model,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       logger.warn("gemini.request_error", {
         provider: this.name,
         model: this.model,
@@ -132,6 +157,12 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
  */
 export function resolveAiCategoryProvider(): AiCategoryProvider {
   const apiKey = process.env.GEMINI_API_KEY;
+  // TEMP debug logging — remove later. Logs selection only (never the key value).
+  logger.info("gemini.debug.provider_selected", {
+    provider: apiKey ? "gemini" : "disabled",
+    apiKeyDetected: Boolean(apiKey),
+    model: apiKey ? (process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL) : null,
+  });
   if (!apiKey) return disabledAiCategoryProvider;
   return new GeminiCategoryProvider(apiKey);
 }
