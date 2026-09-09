@@ -19,7 +19,7 @@ import { logger } from "@/lib/logger";
  */
 
 /** Latest stable Gemini Flash model suited to structured JSON. One place to change it. */
-export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
