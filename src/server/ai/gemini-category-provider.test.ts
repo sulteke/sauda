@@ -37,6 +37,17 @@ function geminiResponse(modelJson: string, usage?: Record<string, number>): Resp
   } as unknown as Response;
 }
 
+/** A non-OK HTTP response with a readable error body. */
+function errorResponse(status: number, body = `{"error":{"code":${status}}}`): Response {
+  return {
+    ok: false,
+    status,
+    statusText: `HTTP ${status}`,
+    text: async () => body,
+    json: async () => ({}),
+  } as unknown as Response;
+}
+
 describe("GeminiCategoryProvider", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let logSpy: ReturnType<typeof vi.spyOn>;
@@ -99,23 +110,62 @@ describe("GeminiCategoryProvider", () => {
     expect(logged).not.toContain("super-secret-key");
   });
 
-  it("never throws: returns an empty result on a non-OK response", async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 429, json: async () => ({}) } as unknown as Response);
+  it("never throws: returns an empty result on a non-OK response, and logs status + body at warn", async () => {
+    fetchMock.mockResolvedValue(errorResponse(400, '{"error":{"code":400,"message":"bad model"}}'));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const result = await new GeminiCategoryProvider("k", { baseUrl: "https://gemini.test" }).analyze(
-      request(),
-    );
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 1,
+    }).analyze(request());
+
     expect(result.categories).toEqual([]);
     expect(result.summary).toBeNull();
+    // The real Google error (status + body) is logged at warn level (visible on Vercel).
+    const warned = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(warned).toContain("gemini.request_failed");
+    expect(warned).toContain('"status":400');
+    expect(warned).toContain("bad model");
+    expect(warned).not.toContain("k"); // never the api key
   });
 
-  it("never throws: returns an empty result on a network error", async () => {
+  it("retries transient 503 and then succeeds", async () => {
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(503, "high demand"))
+      .mockResolvedValueOnce(geminiResponse('{"categories":[{"id":"hudi","confidence":90}]}'));
+
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      retryDelayMs: 0,
+    }).analyze(request());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.categories).toEqual([{ id: "hudi", confidence: 90, reason: "" }]);
+  });
+
+  it("gives up after maxAttempts of persistent 503", async () => {
+    fetchMock.mockResolvedValue(errorResponse(503, "high demand"));
+
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 3,
+      retryDelayMs: 0,
+    }).analyze(request());
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.categories).toEqual([]);
+  });
+
+  it("never throws: retries then returns an empty result on a network error", async () => {
     fetchMock.mockRejectedValue(new Error("network down"));
 
-    const result = await new GeminiCategoryProvider("k", { baseUrl: "https://gemini.test" }).analyze(
-      request(),
-    );
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 2,
+      retryDelayMs: 0,
+    }).analyze(request());
     expect(result.categories).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("tolerates malformed (non-JSON) model replies", async () => {
