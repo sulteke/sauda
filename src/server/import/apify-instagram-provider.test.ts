@@ -28,8 +28,39 @@ const SAMPLE_ITEM = {
   highlightReels: [{ id: "h1", title: "New", coverUrl: "https://img.example/cover.jpg" }],
 };
 
+/** A post item as returned by the general Instagram Scraper (resultsType posts). */
+const postItem = (i: number) => ({
+  id: String(i),
+  shortCode: `code${i}`,
+  caption: `post ${i}`,
+  likesCount: i,
+  commentsCount: i,
+  timestamp: "2026-01-01T00:00:00Z",
+  url: `https://instagram.com/p/code${i}`,
+  type: "Video",
+  videoUrl: "https://cdn.example/v.mp4",
+  hashtags: ["almaty", "sale"],
+  mentions: ["brand"],
+  taggedUsers: [{ username: "partner" }],
+  displayUrl: "https://cdn.example/i.jpg",
+  dimensionsWidth: 1080,
+  dimensionsHeight: 1080,
+});
+
 function jsonResponse(data: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => data } as unknown as Response;
+}
+
+const isProfileUrl = (url: unknown) => String(url).includes("profile-scraper");
+
+/** Routes fetch by actor: profile scraper vs posts scraper. */
+function route(handlers: {
+  profile: () => Response | Promise<Response>;
+  posts?: () => Response | Promise<Response>;
+}) {
+  fetchMock.mockImplementation(async (url: string) =>
+    isProfileUrl(url) ? handlers.profile() : (handlers.posts ?? (() => jsonResponse([])))(),
+  );
 }
 
 function createProvider() {
@@ -42,9 +73,9 @@ function createProvider() {
 
 const REQUEST = { url: "https://instagram.com/almaty.boutique", handle: "almaty.boutique" };
 
-describe("ApifyInstagramProvider", () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
+let fetchMock: ReturnType<typeof vi.fn>;
 
+describe("ApifyInstagramProvider", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -58,71 +89,58 @@ describe("ApifyInstagramProvider", () => {
     vi.restoreAllMocks();
   });
 
-  it("maps an Apify profile item into RawInstagramProfile", async () => {
-    fetchMock.mockResolvedValue(jsonResponse([SAMPLE_ITEM]));
+  it("maps profile fields from the profile scraper and posts from the posts actor", async () => {
+    route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse([postItem(0)]) });
 
     const result = await createProvider().fetchProfile(REQUEST);
 
+    // Profile-level data comes from the profile scraper.
     expect(result.handle).toBe("almaty.boutique");
     expect(result.fullName).toBe("Almaty Boutique");
     expect(result.biography).toBe("Best boutique in Almaty");
     expect(result.profilePicUrl).toBe("https://img.example/hd.jpg"); // prefers HD
     expect(result.followersCount).toBe(12345);
     expect(result.isVerified).toBe(true);
-    // The provider no longer derives a category from businessCategoryName —
-    // categorization is done downstream by the detection engine.
     expect(result).not.toHaveProperty("category");
     expect(result.sourceUrl).toBe(REQUEST.url);
 
-    const raw = result.raw as {
-      provider: string;
-      recentPosts: unknown[];
-      highlights: unknown[];
-      postsCount: number;
-    };
+    // Posts come from the posts actor.
+    expect(result.recentPosts).toHaveLength(1);
+    expect(result.recentPosts[0]?.caption).toBe("post 0");
+
+    const raw = result.raw as { provider: string; recentPosts: unknown[]; highlights: unknown[] };
     expect(raw.provider).toBe("apify");
     expect(raw.recentPosts).toHaveLength(1);
-    expect(raw.highlights).toHaveLength(1);
-    expect(raw.postsCount).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(raw.highlights).toHaveLength(1); // highlights still from the profile scraper
+    // Two actor calls: profile + posts.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("requests the actor's maximum stable post count", async () => {
-    fetchMock.mockResolvedValue(jsonResponse([SAMPLE_ITEM]));
+  it("calls the posts actor with resultsType posts and resultsLimit MAX_RECENT_POSTS", async () => {
+    route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse([postItem(0)]) });
     await createProvider().fetchProfile(REQUEST);
 
-    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body) as {
-      resultsLimit: number;
-    };
-    expect(body.resultsLimit).toBe(MAX_RECENT_POSTS);
-    expect(MAX_RECENT_POSTS).toBeGreaterThanOrEqual(12);
+    const calls = fetchMock.mock.calls;
+    const profileCall = calls.find((c) => isProfileUrl(c[0]))!;
+    const postsCall = calls.find((c) => !isProfileUrl(c[0]))!;
+    const profileBody = JSON.parse((profileCall[1] as { body: string }).body);
+    const postsBody = JSON.parse((postsCall[1] as { body: string }).body);
+
+    expect(String(postsCall[0])).toContain("/acts/apify~instagram-scraper/");
+    expect(profileBody.resultsLimit).toBe(MAX_RECENT_POSTS);
+    expect(postsBody.resultsType).toBe("posts");
+    expect(postsBody.resultsLimit).toBe(MAX_RECENT_POSTS);
+    expect(postsBody.directUrls).toEqual(["https://www.instagram.com/almaty.boutique/"]);
+    expect(MAX_RECENT_POSTS).toBe(30);
   });
 
   it("imports up to MAX_RECENT_POSTS posts and preserves their metadata", async () => {
-    const manyPosts = Array.from({ length: MAX_RECENT_POSTS + 5 }, (_, i) => ({
-      id: String(i),
-      shortCode: `code${i}`,
-      caption: `post ${i}`,
-      likesCount: i,
-      commentsCount: i,
-      timestamp: "2026-01-01T00:00:00Z",
-      url: `https://instagram.com/p/code${i}`,
-      type: "Video",
-      videoUrl: "https://cdn.example/v.mp4",
-      hashtags: ["almaty", "sale"],
-      mentions: ["brand"],
-      taggedUsers: [{ username: "partner" }],
-      displayUrl: "https://cdn.example/i.jpg",
-      dimensionsWidth: 1080,
-      dimensionsHeight: 1080,
-    }));
-    fetchMock.mockResolvedValue(jsonResponse([{ ...SAMPLE_ITEM, latestPosts: manyPosts }]));
+    const many = Array.from({ length: MAX_RECENT_POSTS + 5 }, (_, i) => postItem(i));
+    route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse(many) });
 
     const result = await createProvider().fetchProfile(REQUEST);
 
-    // Capped at the actor's stable ceiling, not the old 6.
     expect(result.recentPosts).toHaveLength(MAX_RECENT_POSTS);
-    // All rich metadata is preserved on the imported posts.
     const post = result.recentPosts[0]!;
     expect(post.type).toBe("Video");
     expect(post.videoUrl).toBe("https://cdn.example/v.mp4");
@@ -132,8 +150,39 @@ describe("ApifyInstagramProvider", () => {
     expect(post.dimensions).toEqual({ width: 1080, height: 1080 });
   });
 
+  it("falls back to the profile scraper's posts when the posts actor returns nothing", async () => {
+    route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse([]) });
+
+    const result = await createProvider().fetchProfile(REQUEST);
+    expect(result.recentPosts).toHaveLength(1);
+    expect(result.recentPosts[0]?.caption).toBe("hello"); // from SAMPLE_ITEM.latestPosts
+  });
+
+  it("does not fail the import when the posts actor errors (falls back to profile posts)", async () => {
+    route({
+      profile: () => jsonResponse([SAMPLE_ITEM]),
+      posts: () => {
+        throw new Error("posts actor down");
+      },
+    });
+
+    const result = await createProvider().fetchProfile(REQUEST);
+    expect(result.handle).toBe("almaty.boutique");
+    expect(result.recentPosts).toHaveLength(1); // profile-scraper fallback
+  });
+
+  it("drops error/placeholder items from the posts actor", async () => {
+    route({
+      profile: () => jsonResponse([SAMPLE_ITEM]),
+      posts: () => jsonResponse([{ error: "restricted" }, { errorDescription: "x" }]),
+    });
+
+    const result = await createProvider().fetchProfile(REQUEST);
+    expect(result.recentPosts).toHaveLength(1); // no valid actor posts → fallback
+  });
+
   it("normalizes a slash actor id to the tilde form in the request URL", async () => {
-    fetchMock.mockResolvedValue(jsonResponse([SAMPLE_ITEM]));
+    route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse([]) });
 
     const provider = new ApifyInstagramProvider({
       token: "test-token",
@@ -141,46 +190,62 @@ describe("ApifyInstagramProvider", () => {
       baseUrl: "https://api.apify.test",
       actorId: "apify/instagram-profile-scraper",
     });
-
     await provider.fetchProfile(REQUEST);
 
-    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
-    expect(calledUrl).toContain("/acts/apify~instagram-profile-scraper/");
-    expect(calledUrl).not.toContain("apify/instagram-profile-scraper");
+    const profileUrl = fetchMock.mock.calls.find((c) => isProfileUrl(c[0]))?.[0] as string;
+    expect(profileUrl).toContain("/acts/apify~instagram-profile-scraper/");
+    expect(profileUrl).not.toContain("apify/instagram-profile-scraper");
   });
 
-  it("retries once and then succeeds", async () => {
-    fetchMock
-      .mockRejectedValueOnce(new Error("network glitch"))
-      .mockResolvedValueOnce(jsonResponse([SAMPLE_ITEM]));
+  it("retries the profile call once and then succeeds", async () => {
+    let profileCalls = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (isProfileUrl(url)) {
+        profileCalls += 1;
+        if (profileCalls === 1) throw new Error("network glitch");
+        return jsonResponse([SAMPLE_ITEM]);
+      }
+      return jsonResponse([]);
+    });
 
     const result = await createProvider().fetchProfile(REQUEST);
-
     expect(result.handle).toBe("almaty.boutique");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(profileCalls).toBe(2);
   });
 
-  it("throws a typed error after failing twice", async () => {
-    fetchMock.mockRejectedValue(new Error("down"));
+  it("throws a typed error after the profile call fails twice (posts never reached)", async () => {
+    let profileCalls = 0;
+    let postsCalls = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (isProfileUrl(url)) {
+        profileCalls += 1;
+        throw new Error("down");
+      }
+      postsCalls += 1;
+      return jsonResponse([]);
+    });
 
     await expect(createProvider().fetchProfile(REQUEST)).rejects.toBeInstanceOf(
       InstagramProviderError,
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(profileCalls).toBe(2);
+    expect(postsCalls).toBe(0);
   });
 
-  it("throws a typed error on a non-OK response", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ error: "rate limited" }, false, 429));
+  it("throws a typed error on a non-OK profile response", async () => {
+    route({ profile: () => jsonResponse({ error: "rate limited" }, false, 429) });
 
     await expect(createProvider().fetchProfile(REQUEST)).rejects.toBeInstanceOf(
       InstagramProviderError,
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("surfaces a timeout as a typed error", async () => {
     const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
-    fetchMock.mockRejectedValue(abort);
+    fetchMock.mockImplementation(async (url: string) => {
+      if (isProfileUrl(url)) throw abort;
+      return jsonResponse([]);
+    });
 
     const error = await createProvider()
       .fetchProfile(REQUEST)
@@ -199,7 +264,7 @@ describe("ApifyInstagramProvider", () => {
   });
 
   it("throws when the profile is not found", async () => {
-    fetchMock.mockResolvedValue(jsonResponse([]));
+    route({ profile: () => jsonResponse([]) });
 
     await expect(createProvider().fetchProfile(REQUEST)).rejects.toBeInstanceOf(
       InstagramProviderError,

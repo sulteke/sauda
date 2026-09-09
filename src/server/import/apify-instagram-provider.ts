@@ -83,11 +83,15 @@ interface InstagramHighlight {
 export interface ApifyInstagramProviderOptions {
   token?: string;
   actorId?: string;
+  /** Actor used only for recent posts (paginates past the profile scraper's 12). */
+  postsActorId?: string;
   timeoutMs?: number;
   baseUrl?: string;
 }
 
 const DEFAULT_ACTOR = "apify~instagram-profile-scraper";
+/** General Instagram Scraper — fetches recent posts with pagination (resultsType "posts"). */
+const DEFAULT_POSTS_ACTOR = "apify~instagram-scraper";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_BASE_URL = "https://api.apify.com";
 const MAX_ATTEMPTS = 2; // initial try + one retry
@@ -179,6 +183,53 @@ function normalizeActorId(actorId: string): string {
 }
 
 /**
+ * Maps a single Apify post item to our internal InstagramPost. The Profile
+ * Scraper's `latestPosts` items and the general Instagram Scraper's `posts`
+ * items share these field names (caption, hashtags, mentions, id, shortCode,
+ * url, likesCount, commentsCount, timestamp, displayUrl, type, videoUrl,
+ * dimensions*, childPosts, musicInfo, isPinned), so one mapper serves both.
+ * Fields absent from one schema (e.g. taggedUsers/location on the posts actor)
+ * degrade to empty/null.
+ */
+function mapApifyPostItem(entry: Record<string, unknown> | null): InstagramPost {
+  const item = entry ?? {};
+  const width = toNumber(item.dimensionsWidth);
+  const height = toNumber(item.dimensionsHeight);
+  const music = (item.musicInfo ?? null) as Record<string, unknown> | null;
+  const childSource = Array.isArray(item.childPosts) ? item.childPosts : [];
+  return {
+    id: toString(item.id),
+    shortCode: toString(item.shortCode),
+    caption: toString(item.caption),
+    likesCount: toNumber(item.likesCount),
+    commentsCount: toNumber(item.commentsCount),
+    timestamp: toString(item.timestamp),
+    url: toString(item.url),
+    imageUrl: toString(item.displayUrl) ?? toString(item.imageUrl),
+    type: toString(item.type),
+    videoUrl: toString(item.videoUrl),
+    hashtags: toStringArray(item.hashtags),
+    mentions: toStringArray(item.mentions),
+    taggedUsers: toUsernameArray(item.taggedUsers),
+    locationName: toString(item.locationName),
+    locationId: toString(item.locationId),
+    childPosts: childSource.map((child): InstagramPostChild => {
+      const c = (child ?? {}) as Record<string, unknown>;
+      return {
+        type: toString(c.type),
+        imageUrl: toString(c.displayUrl) ?? toString(c.imageUrl),
+        videoUrl: toString(c.videoUrl),
+      };
+    }),
+    musicInfo: music
+      ? { artistName: toString(music.artist_name), songName: toString(music.song_name) }
+      : null,
+    dimensions: width !== null || height !== null ? { width, height } : null,
+    isPinned: Boolean(item.isPinned ?? false),
+  };
+}
+
+/**
  * Production Instagram provider backed by the official Apify REST API. It runs an
  * Instagram scraper actor and normalizes the result into RawInstagramProfile.
  * All Apify knowledge — endpoints, payload shape, parsing — lives here.
@@ -188,6 +239,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
 
   private readonly token: string;
   private readonly actorId: string;
+  private readonly postsActorId: string;
   private readonly timeoutMs: number;
   private readonly baseUrl: string;
 
@@ -197,23 +249,34 @@ export class ApifyInstagramProvider implements InstagramProvider {
     this.actorId = normalizeActorId(
       options.actorId ?? process.env.APIFY_INSTAGRAM_ACTOR ?? DEFAULT_ACTOR,
     );
+    this.postsActorId = normalizeActorId(
+      options.postsActorId ?? process.env.APIFY_INSTAGRAM_POSTS_ACTOR ?? DEFAULT_POSTS_ACTOR,
+    );
     this.timeoutMs =
       options.timeoutMs ??
       (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   }
 
-  /** Interface entry point. Composes the four sub-fetches into one profile. */
+  /** Interface entry point. Composes the sub-fetches into one profile. */
   async fetchProfile(request: InstagramProfileRequest): Promise<RawInstagramProfile> {
     const handle = request.handle.trim().toLowerCase();
     if (!handle) {
       throw new InstagramProviderError("An Instagram handle is required.");
     }
 
+    // Profile-level data (bio, followers, address, links, business fields…) comes
+    // from the profile scraper. Recent posts come from the general Instagram
+    // Scraper, which paginates past the profile scraper's 12-post ceiling.
     const profile = await this.getProfile(handle);
     const biography = this.getBio(profile);
     const highlights = this.getHighlights(profile);
-    const recentPosts = this.getRecentPosts(profile);
+    const postsFromActor = await this.fetchRecentPosts(handle);
+    // Resilient fallback: if the posts actor returns nothing (failure / private /
+    // restricted), keep the profile scraper's own latestPosts so we never lose
+    // posts we already had.
+    const recentPosts =
+      postsFromActor.length > 0 ? postsFromActor : this.getRecentPosts(profile);
 
     return {
       handle: toString(profile.username) ?? handle,
@@ -256,6 +319,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
       raw: {
         provider: this.name,
         actorId: this.actorId,
+        postsActorId: this.postsActorId,
         highlights,
         recentPosts,
         postsCount: recentPosts.length,
@@ -305,62 +369,74 @@ export class ApifyInstagramProvider implements InstagramProvider {
     });
   }
 
-  /** Parses recent posts from a fetched profile item. */
+  /** Parses recent posts from a fetched profile item (fallback source only). */
   getRecentPosts(profile: ApifyProfileItem): InstagramPost[] {
     const source = Array.isArray(profile.latestPosts)
       ? profile.latestPosts
       : Array.isArray(profile.posts)
         ? profile.posts
         : [];
+    return source.map((entry) => mapApifyPostItem((entry ?? {}) as Record<string, unknown>));
+  }
 
-    return source.map((entry) => {
-      const item = (entry ?? {}) as Record<string, unknown>;
-      const width = toNumber(item.dimensionsWidth);
-      const height = toNumber(item.dimensionsHeight);
-      const music = (item.musicInfo ?? null) as Record<string, unknown> | null;
-      const childSource = Array.isArray(item.childPosts) ? item.childPosts : [];
-      return {
-        id: toString(item.id),
-        shortCode: toString(item.shortCode),
-        caption: toString(item.caption),
-        likesCount: toNumber(item.likesCount),
-        commentsCount: toNumber(item.commentsCount),
-        timestamp: toString(item.timestamp),
-        url: toString(item.url),
-        imageUrl: toString(item.displayUrl) ?? toString(item.imageUrl),
-        type: toString(item.type),
-        videoUrl: toString(item.videoUrl),
-        hashtags: toStringArray(item.hashtags),
-        mentions: toStringArray(item.mentions),
-        taggedUsers: toUsernameArray(item.taggedUsers),
-        locationName: toString(item.locationName),
-        locationId: toString(item.locationId),
-        childPosts: childSource.map((child): InstagramPostChild => {
-          const c = (child ?? {}) as Record<string, unknown>;
-          return {
-            type: toString(c.type),
-            imageUrl: toString(c.displayUrl) ?? toString(c.imageUrl),
-            videoUrl: toString(c.videoUrl),
-          };
-        }),
-        musicInfo: music
-          ? { artistName: toString(music.artist_name), songName: toString(music.song_name) }
-          : null,
-        dimensions: width !== null || height !== null ? { width, height } : null,
-        isPinned: Boolean(item.isPinned ?? false),
-      };
-    });
+  /**
+   * Fetches up to MAX_RECENT_POSTS recent posts via the general Instagram Scraper
+   * (resultsType "posts"), which paginates past the profile scraper's 12 cap.
+   * Resilient by design: any failure returns [] so the import still succeeds
+   * with profile data and the fetchProfile fallback. Only genuine post items
+   * (with an id/shortCode) are mapped; error/placeholder items are dropped.
+   */
+  async fetchRecentPosts(handle: string): Promise<InstagramPost[]> {
+    try {
+      const payload = await this.runActor(
+        this.postsActorId,
+        {
+          directUrls: [`https://www.instagram.com/${handle}/`],
+          resultsType: "posts",
+          resultsLimit: MAX_RECENT_POSTS,
+          addParentData: false,
+        },
+        handle,
+      );
+      return payload
+        .map((entry) => (entry ?? {}) as Record<string, unknown>)
+        .filter((item) => !item.error && (toString(item.shortCode) || toString(item.id)))
+        .map((item) => mapApifyPostItem(item));
+    } catch (error) {
+      logger.warn("apify.posts_failed", {
+        provider: this.name,
+        actorId: this.postsActorId,
+        handle,
+        error: errorMessage(error),
+      });
+      return [];
+    }
   }
 
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
-  private endpoint(): string {
-    return `${this.baseUrl}/v2/acts/${this.actorId}/run-sync-get-dataset-items`;
+  private endpoint(actorId: string): string {
+    return `${this.baseUrl}/v2/acts/${actorId}/run-sync-get-dataset-items`;
   }
 
+  /** Fetches the profile item(s) from the profile scraper. */
   private async requestDatasetItems(handle: string): Promise<ApifyProfileItem[]> {
+    const payload = await this.runActor(
+      this.actorId,
+      { usernames: [handle], resultsLimit: MAX_RECENT_POSTS },
+      handle,
+    );
+    return payload as ApifyProfileItem[];
+  }
+
+  /** Runs any Apify actor's run-sync-get-dataset-items with retry + timeout. */
+  private async runActor(
+    actorId: string,
+    body: Record<string, unknown>,
+    handle: string,
+  ): Promise<unknown[]> {
     if (!this.token) {
       throw new InstagramProviderError("APIFY_TOKEN is not configured.");
     }
@@ -369,11 +445,12 @@ export class ApifyInstagramProvider implements InstagramProvider {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       try {
-        return await this.callApify(handle, attempt);
+        return await this.callActor(actorId, body, handle, attempt);
       } catch (error) {
         lastError = error;
         logger.warn("apify.attempt_failed", {
           provider: this.name,
+          actorId,
           handle,
           attempt,
           maxAttempts: MAX_ATTEMPTS,
@@ -388,19 +465,24 @@ export class ApifyInstagramProvider implements InstagramProvider {
     );
   }
 
-  private async callApify(handle: string, attempt: number): Promise<ApifyProfileItem[]> {
+  private async callActor(
+    actorId: string,
+    body: Record<string, unknown>,
+    handle: string,
+    attempt: number,
+  ): Promise<unknown[]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const startedAt = Date.now();
 
     try {
-      const response = await fetch(this.endpoint(), {
+      const response = await fetch(this.endpoint(actorId), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.token}`,
         },
-        body: JSON.stringify({ usernames: [handle], resultsLimit: MAX_RECENT_POSTS }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -417,13 +499,14 @@ export class ApifyInstagramProvider implements InstagramProvider {
 
       logger.info("apify.request_ok", {
         provider: this.name,
+        actorId,
         handle,
         attempt,
         durationMs: Date.now() - startedAt,
         items: payload.length,
       });
 
-      return payload as ApifyProfileItem[];
+      return payload;
     } catch (error) {
       if (isAbortError(error)) {
         throw new InstagramProviderError(`Apify request timed out after ${this.timeoutMs}ms.`);

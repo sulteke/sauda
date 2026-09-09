@@ -8,14 +8,13 @@ import type {
 } from "@/types/instagram";
 
 /**
- * Maximum recent posts imported per profile. The Instagram Profile Scraper
- * returns at most ~12 `latestPosts` regardless of the `resultsLimit` sent
- * (verified empirically against real business accounts at limits 30/50/100 —
- * all returned 12), so 12 is the stable ceiling for the current actor. Fetching
- * 30–50 would require a different actor or post pagination, which would change
- * the architecture. Every provider caps its `recentPosts` at this value.
+ * Maximum recent posts imported per profile. Recent posts come from the general
+ * Instagram Scraper (`apify~instagram-scraper`, resultsType "posts"), which
+ * paginates past the Profile Scraper's 12-post ceiling — verified to return 30.
+ * Profile-level fields still come from the Profile Scraper. Every provider caps
+ * its `recentPosts` at this value.
  */
-export const MAX_RECENT_POSTS = 12;
+export const MAX_RECENT_POSTS = 30;
 
 /**
  * Source-agnostic shape of a discovered Instagram profile. Every provider —
