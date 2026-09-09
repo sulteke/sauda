@@ -165,6 +165,10 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
  */
 export function resolveAiCategoryProvider(): AiCategoryProvider {
   const apiKey = process.env.GEMINI_API_KEY;
+  console.log("=== GEMINI ENV DEBUG ===");
+  console.log("GEMINI_API_KEY exists:", Boolean(process.env.GEMINI_API_KEY));
+  console.log("GEMINI_MODEL:", process.env.GEMINI_MODEL);
+  console.log("========================");
   // TEMP debug logging — remove later. Logs selection only (never the key value).
   console.log("GEMINI_PROVIDER_SELECTED", {
     apiKeyDetected: Boolean(apiKey),
