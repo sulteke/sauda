@@ -70,7 +70,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
     const startedAt = Date.now();
 
     // TEMP debug logging — remove later.
-    logger.info("gemini.debug.request_started", { provider: this.name, model: this.model });
+    console.log("GEMINI_REQUEST_STARTED", { provider: this.name, model: this.model });
 
     try {
       const response = await fetch(this.endpoint(), {
@@ -86,7 +86,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
       const durationMs = Date.now() - startedAt;
 
       // TEMP debug logging — remove later.
-      logger.info("gemini.debug.request_finished", {
+      console.log("GEMINI_REQUEST_FINISHED", {
         provider: this.name,
         model: this.model,
         status: response.status,
@@ -158,8 +158,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 export function resolveAiCategoryProvider(): AiCategoryProvider {
   const apiKey = process.env.GEMINI_API_KEY;
   // TEMP debug logging — remove later. Logs selection only (never the key value).
-  logger.info("gemini.debug.provider_selected", {
-    provider: apiKey ? "gemini" : "disabled",
+  console.log("GEMINI_PROVIDER_SELECTED", {
     apiKeyDetected: Boolean(apiKey),
     model: apiKey ? (process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL) : null,
   });
