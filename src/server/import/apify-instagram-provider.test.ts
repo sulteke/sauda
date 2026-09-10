@@ -181,6 +181,31 @@ describe("ApifyInstagramProvider", () => {
     expect(result.recentPosts).toHaveLength(1); // no valid actor posts → fallback
   });
 
+  it("logs import metrics: per-actor time, total fetch time and post count", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    route({
+      profile: () => jsonResponse([SAMPLE_ITEM]),
+      posts: () => jsonResponse([postItem(0), postItem(1)]),
+    });
+
+    await createProvider().fetchProfile(REQUEST);
+
+    const line = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .find((s) => s.includes("apify.import_metrics"));
+    expect(line).toBeTruthy();
+    const entry = JSON.parse(line!);
+    expect(entry).toMatchObject({
+      provider: "apify",
+      handle: "almaty.boutique",
+      postsCount: 2,
+      postsSource: "posts-actor",
+    });
+    expect(typeof entry.profileActorMs).toBe("number");
+    expect(typeof entry.postsActorMs).toBe("number");
+    expect(typeof entry.fetchMs).toBe("number");
+  });
+
   it("normalizes a slash actor id to the tilde form in the request URL", async () => {
     route({ profile: () => jsonResponse([SAMPLE_ITEM]), posts: () => jsonResponse([]) });
 

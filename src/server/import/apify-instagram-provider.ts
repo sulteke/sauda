@@ -268,15 +268,37 @@ export class ApifyInstagramProvider implements InstagramProvider {
     // Profile-level data (bio, followers, address, links, business fields…) comes
     // from the profile scraper. Recent posts come from the general Instagram
     // Scraper, which paginates past the profile scraper's 12-post ceiling.
+    const fetchStartedAt = Date.now();
+
+    const profileStartedAt = Date.now();
     const profile = await this.getProfile(handle);
+    const profileActorMs = Date.now() - profileStartedAt;
+
     const biography = this.getBio(profile);
     const highlights = this.getHighlights(profile);
+
+    const postsStartedAt = Date.now();
     const postsFromActor = await this.fetchRecentPosts(handle);
+    const postsActorMs = Date.now() - postsStartedAt;
+
     // Resilient fallback: if the posts actor returns nothing (failure / private /
     // restricted), keep the profile scraper's own latestPosts so we never lose
     // posts we already had.
-    const recentPosts =
-      postsFromActor.length > 0 ? postsFromActor : this.getRecentPosts(profile);
+    const postsSource = postsFromActor.length > 0 ? "posts-actor" : "profile-fallback";
+    const recentPosts = (
+      postsFromActor.length > 0 ? postsFromActor : this.getRecentPosts(profile)
+    ).slice(0, MAX_RECENT_POSTS);
+
+    // Metrics: time per actor, total fetch time, and how many posts we captured.
+    logger.info("apify.import_metrics", {
+      provider: this.name,
+      handle,
+      profileActorMs,
+      postsActorMs,
+      fetchMs: Date.now() - fetchStartedAt,
+      postsCount: recentPosts.length,
+      postsSource,
+    });
 
     return {
       handle: toString(profile.username) ?? handle,
@@ -286,7 +308,7 @@ export class ApifyInstagramProvider implements InstagramProvider {
       externalUrl: toString(profile.externalUrl),
       followersCount: toNumber(profile.followersCount),
       isVerified: Boolean(profile.verified ?? profile.isVerified ?? false),
-      recentPosts: recentPosts.slice(0, MAX_RECENT_POSTS).map(
+      recentPosts: recentPosts.map(
         (post): RawInstagramPost => ({
           imageUrl: post.imageUrl,
           caption: post.caption,

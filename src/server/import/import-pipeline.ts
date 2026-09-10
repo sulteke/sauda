@@ -10,6 +10,7 @@ import {
   mergeCategories,
   runHybridDetection,
 } from "@/lib/category-pipeline";
+import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { resolveAiCategoryProvider } from "@/server/ai/gemini-category-provider";
 import type { BoutiqueEnrichment, BoutiquePreview, ImportJobDTO } from "@/types";
@@ -121,6 +122,7 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
   const job = await prisma.importJob.findUniqueOrThrow({ where: { id: jobId } });
 
   try {
+    const startedAt = Date.now();
     const provider = getInstagramProvider();
     const profile = await provider.fetchProfile({
       url: job.sourceUrl,
@@ -144,7 +146,7 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       aiProvider.name !== "disabled",
     );
 
-    return await prisma.importJob.update({
+    const updated = await prisma.importJob.update({
       where: { id: jobId },
       data: {
         status: "READY_FOR_REVIEW",
@@ -153,6 +155,17 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
         error: null,
       },
     });
+
+    // Total import (analyze) duration: fetch + detection + persist-to-job.
+    logger.info("import.metrics", {
+      handle: job.handle,
+      totalMs: Date.now() - startedAt,
+      postsCount: preview.recentPosts.length,
+      aiProvider: aiProvider.name,
+      status: "READY_FOR_REVIEW",
+    });
+
+    return updated;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Discovery failed";
     await prisma.importJob.update({
