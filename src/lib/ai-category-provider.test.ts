@@ -60,6 +60,11 @@ describe("buildAiCategoryPrompt", () => {
     expect(prompt).toContain("even if it appears in only one post");
     expect(prompt).toContain("Do NOT collapse to just the most common category");
     expect(prompt).toContain("Sort the categories array by confidence, highest first");
+    // Catalog framing + certainty-based confidence (not frequency).
+    expect(prompt).toContain("PRODUCT CATALOG");
+    expect(prompt).toContain("CERTAINTY that the business sells that category");
+    expect(prompt).toContain("no evidence for it in ANY of the posts");
+    expect(prompt).toMatch(/NOT how frequently it appears/i);
   });
 
   it("parseAiCategoryResult keeps ALL categories the model returns (no cap)", () => {
