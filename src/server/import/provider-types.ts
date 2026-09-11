@@ -10,11 +10,11 @@ import type {
 /**
  * Maximum recent posts imported per profile. Recent posts come from the general
  * Instagram Scraper (`apify~instagram-scraper`, resultsType "posts"), which
- * paginates past the Profile Scraper's 12-post ceiling — verified to return 30.
- * Profile-level fields still come from the Profile Scraper. Every provider caps
- * its `recentPosts` at this value.
+ * paginates past the Profile Scraper's 12-post ceiling. Kept at 20 to bound the
+ * posts-actor runtime and the Gemini prompt size. Profile-level fields still
+ * come from the Profile Scraper. Every provider caps its `recentPosts` here.
  */
-export const MAX_RECENT_POSTS = 30;
+export const MAX_RECENT_POSTS = 20;
 
 /**
  * Source-agnostic shape of a discovered Instagram profile. Every provider —

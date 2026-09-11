@@ -131,7 +131,7 @@ describe("ApifyInstagramProvider", () => {
     expect(postsBody.resultsType).toBe("posts");
     expect(postsBody.resultsLimit).toBe(MAX_RECENT_POSTS);
     expect(postsBody.directUrls).toEqual(["https://www.instagram.com/almaty.boutique/"]);
-    expect(MAX_RECENT_POSTS).toBe(30);
+    expect(MAX_RECENT_POSTS).toBe(20);
   });
 
   it("imports up to MAX_RECENT_POSTS posts and preserves their metadata", async () => {
