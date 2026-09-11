@@ -30,7 +30,7 @@ export function toHashtag(label: string): string {
 }
 
 /** Shape needed to build a Telegram post — sourced entirely from stored data. */
-interface PublishableBoutique {
+export interface PublishableBoutique {
   name: string;
   /** Final detected category labels, highest-scoring first. */
   categories: string[];
@@ -42,7 +42,7 @@ interface PublishableBoutique {
   posts: BoutiquePost[];
 }
 
-function buildCaption(boutique: PublishableBoutique): string {
+export function buildCaption(boutique: PublishableBoutique): string {
   const lines: string[] = [`<b>${escapeHtml(boutique.name)}</b>`];
 
   const meta: string[] = [];
@@ -53,7 +53,9 @@ function buildCaption(boutique: PublishableBoutique): string {
   if (boutique.bio) lines.push(`\n${escapeHtml(boutique.bio)}`);
 
   const links: string[] = [];
-  if (boutique.instagramUrl) links.push(`📷 ${escapeHtml(boutique.instagramUrl)}`);
+  // Show "Instagram" as the link text, never the raw URL (the URL stays the href).
+  if (boutique.instagramUrl)
+    links.push(`📷 <a href="${escapeHtml(boutique.instagramUrl)}">Instagram</a>`);
   if (boutique.externalUrl) links.push(`🌐 ${escapeHtml(boutique.externalUrl)}`);
   if (links.length > 0) lines.push(`\n${links.join("\n")}`);
 

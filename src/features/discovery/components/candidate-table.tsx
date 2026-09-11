@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Compass } from "lucide-react";
 import { toast } from "sonner";
 
+import { InstagramLink } from "@/components/instagram-link";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -143,14 +144,10 @@ export function CandidateTable() {
                   />
                 </TableCell>
                 <TableCell className="font-medium">
-                  <a
-                    href={candidate.instagramUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="hover:underline"
-                  >
-                    @{candidate.handle}
-                  </a>
+                  <InstagramLink
+                    url={candidate.instagramUrl}
+                    className="inline-flex items-center gap-1 hover:underline"
+                  />
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline">

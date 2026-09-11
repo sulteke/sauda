@@ -9,7 +9,6 @@ import {
   Heart,
   ImageOff,
   Images,
-  Instagram,
   Link2,
   MapPin,
   MessageCircle,
@@ -22,6 +21,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+import { InstagramLink } from "@/components/instagram-link";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -203,18 +203,7 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
               ) : null}
               {boutique.isPrivate ? <Badge variant="outline">Private</Badge> : null}
             </div>
-            {boutique.instagramHandle ? (
-              <a
-                href={
-                  boutique.instagramUrl ?? `https://www.instagram.com/${boutique.instagramHandle}/`
-                }
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-              >
-                <Instagram className="h-4 w-4" />@{boutique.instagramHandle}
-              </a>
-            ) : null}
+            <InstagramLink url={boutique.instagramUrl} />
           </div>
         </CardHeader>
 

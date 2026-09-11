@@ -2,6 +2,7 @@
 
 import { ListChecks } from "lucide-react";
 
+import { InstagramLink } from "@/components/instagram-link";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -83,8 +84,11 @@ export function QueueTable() {
         <TableBody>
           {items.map((item) => (
             <TableRow key={item.id}>
-              <TableCell className="max-w-[280px] truncate font-mono text-xs">
-                {item.instagramUrl}
+              <TableCell>
+                <InstagramLink
+                  url={item.instagramUrl}
+                  className="inline-flex items-center gap-1 text-sm hover:underline"
+                />
               </TableCell>
               <TableCell>
                 <Badge variant={STATUS_VARIANT[item.status]}>{STATUS_LABEL[item.status]}</Badge>

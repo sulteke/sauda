@@ -1,7 +1,8 @@
 "use client";
 
-import { BadgeCheck, CheckCircle2, ExternalLink, Loader2, Sparkles, Users } from "lucide-react";
+import { BadgeCheck, CheckCircle2, Loader2, Sparkles, Users } from "lucide-react";
 
+import { InstagramLink } from "@/components/instagram-link";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,15 +52,7 @@ export function ImportPreview({ job, onSave, onReset, isSaving = false }: Import
                 <BadgeCheck className="h-4 w-4 shrink-0 text-sky-500" aria-label="Verified" />
               ) : null}
             </div>
-            <a
-              href={preview.instagramUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-            >
-              @{preview.instagramHandle}
-              <ExternalLink className="h-3 w-3" />
-            </a>
+            <InstagramLink url={preview.instagramUrl} />
             <div className="flex flex-wrap items-center gap-3 pt-1 text-sm text-muted-foreground">
               {preview.followersCount !== null ? (
                 <span className="inline-flex items-center gap-1">
