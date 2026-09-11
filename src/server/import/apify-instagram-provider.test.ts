@@ -238,23 +238,21 @@ describe("ApifyInstagramProvider", () => {
     expect(profileCalls).toBe(2);
   });
 
-  it("throws a typed error after the profile call fails twice (posts never reached)", async () => {
+  it("throws a typed error after the profile call fails twice", async () => {
     let profileCalls = 0;
-    let postsCalls = 0;
     fetchMock.mockImplementation(async (url: string) => {
       if (isProfileUrl(url)) {
         profileCalls += 1;
         throw new Error("down");
       }
-      postsCalls += 1;
-      return jsonResponse([]);
+      return jsonResponse([]); // posts runs concurrently; its result is discarded on profile failure
     });
 
     await expect(createProvider().fetchProfile(REQUEST)).rejects.toBeInstanceOf(
       InstagramProviderError,
     );
+    // Profile is retried (initial + one retry) before the whole fetch rejects.
     expect(profileCalls).toBe(2);
-    expect(postsCalls).toBe(0);
   });
 
   it("throws a typed error on a non-OK profile response", async () => {

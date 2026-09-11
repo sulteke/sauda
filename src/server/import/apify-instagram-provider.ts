@@ -268,18 +268,30 @@ export class ApifyInstagramProvider implements InstagramProvider {
     // Profile-level data (bio, followers, address, links, business fields…) comes
     // from the profile scraper. Recent posts come from the general Instagram
     // Scraper, which paginates past the profile scraper's 12-post ceiling.
+    // The two scrapes are independent (each keyed only on the handle), so run
+    // them concurrently to overlap the two slow actor calls instead of summing
+    // them. Behavior is unchanged: a missing profile still rejects (getProfile
+    // throws → Promise.all rejects), and fetchRecentPosts never throws.
     const fetchStartedAt = Date.now();
 
-    const profileStartedAt = Date.now();
-    const profile = await this.getProfile(handle);
-    const profileActorMs = Date.now() - profileStartedAt;
+    const [profileResult, postsResult] = await Promise.all([
+      (async () => {
+        const startedAt = Date.now();
+        const profile = await this.getProfile(handle);
+        return { profile, ms: Date.now() - startedAt };
+      })(),
+      (async () => {
+        const startedAt = Date.now();
+        const posts = await this.fetchRecentPosts(handle);
+        return { posts, ms: Date.now() - startedAt };
+      })(),
+    ]);
+
+    const { profile, ms: profileActorMs } = profileResult;
+    const { posts: postsFromActor, ms: postsActorMs } = postsResult;
 
     const biography = this.getBio(profile);
     const highlights = this.getHighlights(profile);
-
-    const postsStartedAt = Date.now();
-    const postsFromActor = await this.fetchRecentPosts(handle);
-    const postsActorMs = Date.now() - postsStartedAt;
 
     // Resilient fallback: if the posts actor returns nothing (failure / private /
     // restricted), keep the profile scraper's own latestPosts so we never lose
