@@ -2,6 +2,7 @@ import "server-only";
 
 import type { ImportQueue } from "@prisma/client";
 
+import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
 import { analyzeInstagramProfile, saveBoutiqueFromImport } from "@/services/import.service";
@@ -66,10 +67,16 @@ export async function processNextImport(): Promise<ProcessResult> {
   });
 
   if (!next) {
+    // No PENDING jobs left — this call drained the queue.
+    logger.info("queue.finished", { reason: "no-pending-jobs" });
     return { processed: false, item: null, remaining: 0 };
   }
 
+  // Next pending job selected + started.
+  logger.info("queue.job_selected", { id: next.id, instagramUrl: next.instagramUrl });
   await prisma.importQueue.update({ where: { id: next.id }, data: { status: "PROCESSING" } });
+  const startedAt = Date.now();
+  logger.info("queue.job_started", { id: next.id, instagramUrl: next.instagramUrl });
 
   try {
     const job = await analyzeInstagramProfile({ url: next.instagramUrl, userId: null });
@@ -79,14 +86,29 @@ export async function processNextImport(): Promise<ProcessResult> {
       where: { id: next.id },
       data: { status: "COMPLETED", error: null },
     });
-    return { processed: true, item: toDTO(updated), remaining: await countPending() };
+    const remaining = await countPending();
+    logger.info("queue.job_finished", {
+      id: next.id,
+      status: "COMPLETED",
+      durationMs: Date.now() - startedAt,
+      remaining,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Import failed";
     const updated = await prisma.importQueue.update({
       where: { id: next.id },
       data: { status: "FAILED", error: message },
     });
-    return { processed: true, item: toDTO(updated), remaining: await countPending() };
+    const remaining = await countPending();
+    logger.warn("queue.job_finished", {
+      id: next.id,
+      status: "FAILED",
+      durationMs: Date.now() - startedAt,
+      remaining,
+      error: message,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
   }
 }
 
