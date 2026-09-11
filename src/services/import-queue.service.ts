@@ -55,12 +55,51 @@ export interface ProcessResult {
   remaining: number;
 }
 
+/** A job stuck in PROCESSING longer than this is treated as dead and re-queued. */
+const STALE_PROCESSING_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Recovers jobs orphaned in PROCESSING (e.g. the serverless function was killed
+ * by a Vercel timeout before it could mark COMPLETED/FAILED). Any PROCESSING job
+ * whose last update is older than STALE_PROCESSING_MS is reset to PENDING so it
+ * is picked up again. No real import runs longer than the function limit, so the
+ * threshold never touches a genuinely in-flight job.
+ */
+export async function requeueStaleJobs(): Promise<number> {
+  const threshold = new Date(Date.now() - STALE_PROCESSING_MS);
+  const where = { status: "PROCESSING" as const, updatedAt: { lt: threshold } };
+
+  const stale = await prisma.importQueue.findMany({
+    where,
+    select: { id: true, instagramUrl: true, updatedAt: true },
+  });
+  if (stale.length === 0) return 0;
+
+  logger.warn("queue.stale_job_detected", {
+    count: stale.length,
+    thresholdMinutes: STALE_PROCESSING_MS / 60_000,
+    jobs: stale.map((job) => ({
+      id: job.id,
+      instagramUrl: job.instagramUrl,
+      stuckForMs: Date.now() - job.updatedAt.getTime(),
+    })),
+  });
+
+  const { count } = await prisma.importQueue.updateMany({ where, data: { status: "PENDING" } });
+  logger.info("queue.job_requeued", { count, ids: stale.map((job) => job.id) });
+  return count;
+}
+
 /**
  * Processes the oldest PENDING queue item through the EXISTING import pipeline
  * (analyze → save). Marks COMPLETED, or FAILED with the error. No import logic
  * is duplicated here — it only orchestrates the queue lifecycle.
  */
 export async function processNextImport(): Promise<ProcessResult> {
+  // Recover any jobs left stuck in PROCESSING (killed mid-run) before selecting
+  // the next job, so a timed-out job is retried instead of being lost.
+  await requeueStaleJobs();
+
   const next = await prisma.importQueue.findFirst({
     where: { status: "PENDING" },
     orderBy: { createdAt: "asc" },
