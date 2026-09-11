@@ -35,10 +35,13 @@ export function parseDiscoverySeed(input: string): DiscoverySeed | null {
   if (!trimmed) return null;
 
   if (trimmed.startsWith("#")) {
+    // Instagram hashtags support Unicode (Cyrillic, Kazakh, …), so keep any
+    // letter/number plus underscore — stripping to ASCII would turn
+    // "#алматыодежда" into "" and wrongly reject it.
     const value = trimmed
       .slice(1)
       .toLowerCase()
-      .replace(/[^a-z0-9_]/g, "");
+      .replace(/[^\p{L}\p{N}_]/gu, "");
     return value ? { type: "HASHTAG", value } : null;
   }
 
