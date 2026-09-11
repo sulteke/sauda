@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddToQueueForm } from "@/features/queue/components/add-to-queue-form";
 import { ProcessQueueButton } from "@/features/queue/components/process-queue-button";
+import { QueueHeaderActions } from "@/features/queue/components/queue-header-actions";
 import { QueueTable } from "@/features/queue/components/queue-table";
 
 export const metadata: Metadata = {
@@ -17,7 +18,10 @@ export default function QueuePage() {
         title="Import Queue"
         description="Bulk-import boutiques from Instagram URLs — no manual pasting one by one."
       >
-        <ProcessQueueButton />
+        <div className="flex flex-wrap items-center gap-2">
+          <QueueHeaderActions />
+          <ProcessQueueButton />
+        </div>
       </PageHeader>
 
       <Card>

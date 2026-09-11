@@ -55,3 +55,26 @@ export function useProcessNext() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
   });
 }
+
+export function useDeleteQueueItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<{ deleted: number }>(`/api/queue/${id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
+  });
+}
+
+export type ClearQueueScope = "COMPLETED" | "FAILED" | "ALL";
+
+export function useClearQueue() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (scope: ClearQueueScope) =>
+      request<{ deleted: number }>("/api/queue/clear", {
+        method: "POST",
+        body: JSON.stringify({ scope }),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
+  });
+}

@@ -49,6 +49,25 @@ export async function listQueue(): Promise<ImportQueueItemDTO[]> {
   }
 }
 
+/**
+ * Permanently deletes a single queue row (any status — a PROCESSING row can be
+ * removed too). Idempotent: deleting a missing row just returns { deleted: 0 }.
+ */
+export async function deleteQueueItem(id: string): Promise<{ deleted: number }> {
+  const { count } = await prisma.importQueue.deleteMany({ where: { id } });
+  return { deleted: count };
+}
+
+/** What a bulk clear targets. "ALL" removes every row regardless of status. */
+export type ClearQueueScope = "COMPLETED" | "FAILED" | "ALL";
+
+/** Permanently deletes queue rows matching the scope. Returns how many were removed. */
+export async function clearQueue(scope: ClearQueueScope): Promise<{ deleted: number }> {
+  const where = scope === "ALL" ? {} : { status: scope };
+  const { count } = await prisma.importQueue.deleteMany({ where });
+  return { deleted: count };
+}
+
 export interface ProcessResult {
   processed: boolean;
   item: ImportQueueItemDTO | null;

@@ -6,6 +6,7 @@ import { InstagramLink } from "@/components/instagram-link";
 import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DeleteQueueItemButton } from "@/features/queue/components/delete-queue-item-button";
 import {
   Table,
   TableBody,
@@ -79,6 +80,9 @@ export function QueueTable() {
             <TableHead>Status</TableHead>
             <TableHead>Detail</TableHead>
             <TableHead>Added</TableHead>
+            <TableHead className="w-10 text-right">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -98,6 +102,9 @@ export function QueueTable() {
               </TableCell>
               <TableCell className="whitespace-nowrap text-muted-foreground">
                 {formatDate(item.createdAt)}
+              </TableCell>
+              <TableCell className="text-right">
+                <DeleteQueueItemButton id={item.id} />
               </TableCell>
             </TableRow>
           ))}
