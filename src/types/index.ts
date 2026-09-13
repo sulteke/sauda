@@ -1,4 +1,9 @@
-export type { BoutiqueDTO, BoutiquePost, BoutiqueStatus } from "./boutique";
+export type {
+  BoutiqueDTO,
+  BoutiquePost,
+  BoutiqueStatus,
+  TelegramPublishStatus,
+} from "./boutique";
 export type {
   CategoryMatch,
   CategoryMatchSource,

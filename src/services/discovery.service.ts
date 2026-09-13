@@ -3,10 +3,43 @@ import "server-only";
 import type { DiscoveryCandidate } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { getDiscoveryProvider, parseDiscoverySeed } from "@/server/discovery/discovery-provider";
+import {
+  DEFAULT_TARGET_NEW_ACCOUNTS,
+  getDiscoveryProvider,
+  parseDiscoverySeed,
+} from "@/server/discovery/discovery-provider";
 import { DiscoveryValidationError } from "@/server/discovery/errors";
 import { addUrlsToQueue } from "@/services/import-queue.service";
 import type { DiscoveryCandidateDTO, DiscoverySeedType } from "@/types";
+
+/**
+ * Returns the subset of the given handles that already exist in the database —
+ * either as an imported boutique or as a previously-discovered candidate — so
+ * discovery can skip them and keep only genuinely-new accounts. Handles are
+ * compared lowercased (the normalized form stored for both).
+ */
+async function findKnownHandles(handles: string[]): Promise<Set<string>> {
+  if (handles.length === 0) return new Set();
+  const lower = Array.from(new Set(handles.map((handle) => handle.toLowerCase())));
+
+  const [boutiques, candidates] = await Promise.all([
+    prisma.boutique.findMany({
+      where: { instagramHandle: { in: lower } },
+      select: { instagramHandle: true },
+    }),
+    prisma.discoveryCandidate.findMany({
+      where: { handle: { in: lower } },
+      select: { handle: true },
+    }),
+  ]);
+
+  const known = new Set<string>();
+  for (const boutique of boutiques) {
+    if (boutique.instagramHandle) known.add(boutique.instagramHandle.toLowerCase());
+  }
+  for (const candidate of candidates) known.add(candidate.handle.toLowerCase());
+  return known;
+}
 
 function toDTO(row: DiscoveryCandidate): DiscoveryCandidateDTO {
   return {
@@ -42,7 +75,12 @@ export async function runDiscovery(input: string): Promise<DiscoveryRunResult> {
   }
 
   const provider = getDiscoveryProvider();
-  const accounts = await provider.discover(seed);
+  // Paginate until we collect enough genuinely-new accounts (or run out of
+  // results), skipping any handle already imported or previously discovered.
+  const accounts = await provider.discover(seed, {
+    isKnownHandles: findKnownHandles,
+    targetNewCount: DEFAULT_TARGET_NEW_ACCOUNTS,
+  });
 
   const created =
     accounts.length > 0

@@ -11,6 +11,7 @@ import {
   mergeCategories,
   runHybridDetection,
 } from "@/lib/category-pipeline";
+import { resolveLocation } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { resolveAiCategoryProvider } from "@/server/ai/gemini-category-provider";
@@ -240,6 +241,15 @@ async function upsertBoutiqueFromPreview(
     aiResult: jsonOrDbNull(preview.aiResult),
   };
 
+  // Location is derived from data we already have (enrichment city, AI city). It
+  // is set on CREATE only; on UPDATE, city/region/country are left untouched so a
+  // re-import never overwrites a manually-corrected location. Location NEVER
+  // filters a boutique out — it only later gates Telegram publication.
+  const location = resolveLocation({
+    enrichmentCity: preview.enrichment?.city ?? null,
+    aiCity: preview.aiResult?.city ?? null,
+  });
+
   return prisma.boutique.upsert({
     where: { instagramHandle: preview.instagramHandle },
     update: { ...profileData, ...(keepExistingAi ? {} : categoryData), updatedAt: new Date() },
@@ -247,7 +257,9 @@ async function upsertBoutiqueFromPreview(
       name: preview.name,
       slug: preview.slug,
       description: preview.description,
-      city: preview.city,
+      city: location.city,
+      region: location.region,
+      country: location.country,
       status: "DRAFT",
       instagramHandle: preview.instagramHandle,
       instagramUrl: preview.instagramUrl,

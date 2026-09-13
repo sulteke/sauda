@@ -15,7 +15,7 @@ import {
 import { resolveProductCategories } from "@/lib/category-engine";
 import { applyCorrection, mergeCategories } from "@/lib/category-pipeline";
 import { prisma } from "@/lib/prisma";
-import type { BoutiqueDTO, BoutiqueStatus } from "@/types";
+import type { BoutiqueDTO, BoutiqueStatus, TelegramPublishStatus } from "@/types";
 import { slugify } from "@/utils/format";
 
 function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO {
@@ -25,6 +25,8 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     slug: row.slug,
     description: row.description,
     city: row.city,
+    region: row.region,
+    country: row.country,
     status: row.status,
     telegramQueued: row.telegramQueued,
     avatarUrl: row.avatarUrl,
@@ -41,6 +43,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
     instagramUrl: row.instagramUrl,
+    telegramStatus: row.telegramStatus,
     telegramError: row.telegramError,
     posts: parsePosts(row.posts),
     isVerified: row.isVerified,
@@ -82,7 +85,7 @@ export async function listReviewQueue(): Promise<BoutiqueDTO[]> {
   }
 }
 
-/** Boutiques in any of the given statuses (used by the Telegram board). */
+/** Boutiques in any of the given statuses. */
 export async function listBoutiquesByStatus(statuses: BoutiqueStatus[]): Promise<BoutiqueDTO[]> {
   try {
     const rows = await prisma.boutique.findMany({
@@ -92,6 +95,26 @@ export async function listBoutiquesByStatus(statuses: BoutiqueStatus[]): Promise
     return rows.map((row) => toDTO(row));
   } catch (error) {
     console.error("Failed to list boutiques by status:", error);
+    return [];
+  }
+}
+
+/**
+ * Approved boutiques in a given Telegram publishing state (used by the Telegram
+ * board). Telegram state is independent of approval — all these rows are
+ * APPROVED; only their `telegramStatus` differs.
+ */
+export async function listBoutiquesByTelegramStatus(
+  telegramStatus: TelegramPublishStatus,
+): Promise<BoutiqueDTO[]> {
+  try {
+    const rows = await prisma.boutique.findMany({
+      where: { status: "APPROVED", telegramStatus },
+      orderBy: { updatedAt: "desc" },
+    });
+    return rows.map((row) => toDTO(row));
+  } catch (error) {
+    console.error("Failed to list boutiques by telegram status:", error);
     return [];
   }
 }

@@ -107,7 +107,7 @@ export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
                     size="sm"
                     variant="outline"
                     disabled={pendingId === boutique.id}
-                    onClick={() => act(boutique.id, "READY_TO_PUBLISH", "Approved")}
+                    onClick={() => act(boutique.id, "APPROVED", "Approved")}
                   >
                     <Check className="h-4 w-4" />
                     Approve

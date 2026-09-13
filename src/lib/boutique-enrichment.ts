@@ -1,6 +1,8 @@
 import type { BoutiqueEnrichment } from "@/types/enrichment";
 import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
 
+import { KZ_CITIES } from "./location";
+
 /**
  * Boutique enrichment — derives structured business information from data we
  * ALREADY have (bio text, the profile's external links, and Apify's business
@@ -27,31 +29,6 @@ export const EMPTY_ENRICHMENT: BoutiqueEnrichment = {
   deliveryRegions: [],
   businessHours: null,
 };
-
-// Kazakhstan cities (Cyrillic + Latin + common variants) for bio-based detection.
-const KZ_CITIES: { display: string; variants: string[] }[] = [
-  { display: "Алматы", variants: ["алматы", "almaty", "алма-ата", "алма ата"] },
-  {
-    display: "Астана",
-    variants: ["астана", "астане", "астаны", "astana", "нур-султан", "нурсултан", "nur-sultan", "nursultan"],
-  },
-  { display: "Шымкент", variants: ["шымкент", "шымкенте", "shymkent", "чимкент"] },
-  { display: "Караганда", variants: ["караганда", "караганде", "караганды", "karaganda", "қарағанды"] },
-  { display: "Актобе", variants: ["актобе", "aktobe", "ақтөбе"] },
-  { display: "Тараз", variants: ["тараз", "таразе", "taraz"] },
-  { display: "Павлодар", variants: ["павлодар", "павлодаре", "pavlodar"] },
-  { display: "Усть-Каменогорск", variants: ["усть-каменогорск", "ust-kamenogorsk", "өскемен"] },
-  { display: "Семей", variants: ["семей", "семее", "semey", "семипалатинск"] },
-  { display: "Атырау", variants: ["атырау", "atyrau"] },
-  { display: "Костанай", variants: ["костанай", "костанае", "kostanay", "қостанай"] },
-  { display: "Кызылорда", variants: ["кызылорда", "кызылорде", "кызылорды", "kyzylorda", "қызылорда"] },
-  { display: "Уральск", variants: ["уральск", "уральске", "uralsk"] },
-  { display: "Петропавловск", variants: ["петропавловск", "петропавловске", "petropavlovsk"] },
-  { display: "Актау", variants: ["актау", "aktau"] },
-  { display: "Кокшетау", variants: ["кокшетау", "kokshetau"] },
-  { display: "Талдыкорган", variants: ["талдыкорган", "талдыкоргане", "taldykorgan"] },
-  { display: "Туркестан", variants: ["туркестан", "туркестане", "turkestan", "түркістан"] },
-];
 
 const URL_REGEX = /((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?)/gi;
 const ADDRESS_KEYWORDS =

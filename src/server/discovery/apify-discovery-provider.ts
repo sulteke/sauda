@@ -2,7 +2,14 @@ import "server-only";
 
 import { logger } from "@/lib/logger";
 
-import type { DiscoveredAccount, DiscoveryProvider, DiscoverySeed } from "./discovery-provider";
+import {
+  DEFAULT_DISCOVERY_PAGE_SIZE,
+  DEFAULT_TARGET_NEW_ACCOUNTS,
+  type DiscoverOptions,
+  type DiscoveredAccount,
+  type DiscoveryProvider,
+  type DiscoverySeed,
+} from "./discovery-provider";
 import {
   DiscoveryNotFoundError,
   DiscoveryPrivateAccountError,
@@ -13,7 +20,12 @@ const DEFAULT_BASE_URL = "https://api.apify.com";
 const DEFAULT_PROFILE_ACTOR = "apify~instagram-profile-scraper";
 const DEFAULT_HASHTAG_ACTOR = "apify~instagram-hashtag-scraper";
 const DEFAULT_TIMEOUT_MS = 90_000; // discovery scrapes can be slow
-const DEFAULT_RESULTS_LIMIT = 50; // bounded — respect rate limits / cost
+// Upper bound on hashtag posts pulled in one run, overridable via
+// APIFY_DISCOVERY_RESULTS_LIMIT. The sync dataset endpoint returns the whole set
+// at once, so we fetch a generous cap and then walk it in pages — this gives the
+// paginator room to find enough NEW accounts even when many posts belong to
+// already-imported owners. Bounded for cost / rate limits.
+const DEFAULT_RESULTS_LIMIT = 300;
 const MAX_ATTEMPTS = 2; // initial try + one retry
 const RETRY_DELAY_MS = 1_500; // gentle backoff between retries
 
@@ -106,42 +118,108 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
     this.timeoutMs =
       options.timeoutMs ??
       (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_TIMEOUT_MS);
-    this.resultsLimit = options.resultsLimit ?? DEFAULT_RESULTS_LIMIT;
+    const envLimit = Number(process.env.APIFY_DISCOVERY_RESULTS_LIMIT);
+    this.resultsLimit =
+      options.resultsLimit ??
+      (Number.isFinite(envLimit) && envLimit > 0 ? envLimit : DEFAULT_RESULTS_LIMIT);
   }
 
-  async discover(seed: DiscoverySeed): Promise<DiscoveredAccount[]> {
+  async discover(seed: DiscoverySeed, options: DiscoverOptions = {}): Promise<DiscoveredAccount[]> {
     if (!this.token) {
       throw new DiscoveryProviderError("APIFY_TOKEN is not configured.");
     }
 
-    const accounts =
-      seed.type === "HASHTAG"
-        ? await this.discoverByHashtag(seed.value)
-        : await this.discoverByProfile(seed.value);
+    // The hashtag path paginates and filters against the DB internally, so it
+    // already returns a deduped, NEW-only list. The profile path returns a fixed
+    // set of related accounts, deduped here.
+    if (seed.type === "HASHTAG") {
+      return this.discoverByHashtag(seed.value, options);
+    }
 
+    const accounts = await this.discoverByProfile(seed.value);
     return this.dedupe(accounts, seed);
   }
 
-  private async discoverByHashtag(tag: string): Promise<DiscoveredAccount[]> {
+  /**
+   * Discovers NEW accounts posting under a hashtag. One bounded Apify run returns
+   * the hashtag's recent posts; we then walk them page by page, and for EACH page
+   * normalize owners → dedupe within the run → skip accounts already in the DB →
+   * keep the new ones. We keep consuming pages until we have collected
+   * `targetNewCount` new accounts OR we run out of results ("no more pages").
+   * A page that contributes zero new accounts is NOT a stop condition — we only
+   * stop on the target or on exhausting the fetched results.
+   */
+  private async discoverByHashtag(
+    tag: string,
+    options: DiscoverOptions,
+  ): Promise<DiscoveredAccount[]> {
+    const targetNew = options.targetNewCount ?? DEFAULT_TARGET_NEW_ACCOUNTS;
+    const pageSize = options.pageSize ?? DEFAULT_DISCOVERY_PAGE_SIZE;
+
     const posts = await this.runActor<ApifyHashtagPost>(this.hashtagActorId, {
       hashtags: [tag],
       resultsType: "posts",
       resultsLimit: this.resultsLimit,
     });
 
-    const accounts: DiscoveredAccount[] = [];
-    for (const post of posts) {
-      const username = toStringOrNull(post.ownerUsername);
-      if (!username) continue;
-      accounts.push({
-        handle: username.toLowerCase(),
-        instagramUrl: profileUrl(username),
-        fullName: toStringOrNull(post.ownerFullName),
-        avatarUrl: null,
-        followersCount: null,
-      });
+    const collected: DiscoveredAccount[] = [];
+    const seen = new Set<string>(); // dedupe across the whole run
+    let pagesChecked = 0;
+    let accountsSeen = 0; // unique accounts actually examined against the DB
+    let existingAccounts = 0; // of those, how many already existed
+
+    for (let start = 0; start < posts.length && collected.length < targetNew; start += pageSize) {
+      pagesChecked += 1;
+      const page = posts.slice(start, start + pageSize);
+
+      // Normalize this page's owners and drop duplicates already seen in the run.
+      const pageAccounts: DiscoveredAccount[] = [];
+      for (const post of page) {
+        const username = toStringOrNull(post.ownerUsername);
+        if (!username) continue;
+        const handle = username.toLowerCase();
+        if (seen.has(handle)) continue;
+        seen.add(handle);
+        pageAccounts.push({
+          handle,
+          instagramUrl: profileUrl(username),
+          fullName: toStringOrNull(post.ownerFullName),
+          avatarUrl: null,
+          followersCount: null,
+        });
+      }
+
+      // Skip accounts that already exist in the DB (imported or discovered).
+      const known =
+        options.isKnownHandles && pageAccounts.length > 0
+          ? await options.isKnownHandles(pageAccounts.map((account) => account.handle))
+          : new Set<string>();
+
+      for (const account of pageAccounts) {
+        accountsSeen += 1;
+        if (known.has(account.handle)) {
+          existingAccounts += 1;
+          continue;
+        }
+        collected.push(account);
+        if (collected.length >= targetNew) break;
+      }
     }
-    return accounts;
+
+    const stoppedReason = collected.length >= targetNew ? "target_reached" : "dataset_exhausted";
+
+    logger.info("discovery.pagination", {
+      hashtag: tag,
+      resultsLimit: this.resultsLimit,
+      pagesChecked,
+      accountsSeen,
+      existingAccounts,
+      newAccounts: collected.length,
+      returnedAccounts: collected.length,
+      stoppedReason,
+    });
+
+    return collected;
   }
 
   private async discoverByProfile(handle: string): Promise<DiscoveredAccount[]> {

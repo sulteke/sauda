@@ -5,6 +5,7 @@ import type { BoutiqueStatus } from "@/types";
 export const BOUTIQUE_STATUSES = [
   "DRAFT",
   "NEEDS_REVIEW",
+  "APPROVED",
   "READY_TO_PUBLISH",
   "PUBLISHED",
   "REJECTED",
@@ -15,6 +16,7 @@ export const BOUTIQUE_STATUSES = [
 export const BOUTIQUE_STATUS_LABELS: Record<BoutiqueStatus, string> = {
   DRAFT: "Draft",
   NEEDS_REVIEW: "Needs review",
+  APPROVED: "Approved (website)",
   READY_TO_PUBLISH: "Ready to publish",
   PUBLISHED: "Published",
   REJECTED: "Rejected",
@@ -28,6 +30,7 @@ export const BOUTIQUE_STATUS_VARIANTS: Record<
 > = {
   DRAFT: "outline",
   NEEDS_REVIEW: "secondary",
+  APPROVED: "default",
   READY_TO_PUBLISH: "secondary",
   PUBLISHED: "default",
   REJECTED: "destructive",

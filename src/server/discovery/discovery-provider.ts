@@ -20,10 +20,34 @@ export interface DiscoveredAccount {
   followersCount: number | null;
 }
 
-/** The seam between discovery and any account-discovery source. Unchanged. */
+/** How many genuinely-new accounts a hashtag discovery run aims to collect. */
+export const DEFAULT_TARGET_NEW_ACCOUNTS = 10;
+/** Page size used when walking hashtag results and filtering against the DB. */
+export const DEFAULT_DISCOVERY_PAGE_SIZE = 10;
+
+/**
+ * Options threaded into a discovery run. The provider stays DB-agnostic: the
+ * service injects `isKnownHandles` (which queries Prisma) so the paginator can
+ * skip accounts already imported or already discovered, and keep fetching pages
+ * until it has collected `targetNewCount` genuinely-new accounts.
+ */
+export interface DiscoverOptions {
+  /**
+   * Given a batch of lowercase handles, returns the subset that already exists
+   * in the database (as a boutique or an existing discovery candidate). Absent
+   * in contexts with no DB (then nothing is treated as known).
+   */
+  isKnownHandles?: (handles: string[]) => Promise<Set<string>>;
+  /** Stop collecting once this many NEW accounts are found. Default 10. */
+  targetNewCount?: number;
+  /** Accounts examined per page while walking results. Default 10. */
+  pageSize?: number;
+}
+
+/** The seam between discovery and any account-discovery source. */
 export interface DiscoveryProvider {
   readonly name: string;
-  discover(seed: DiscoverySeed): Promise<DiscoveredAccount[]>;
+  discover(seed: DiscoverySeed, options?: DiscoverOptions): Promise<DiscoveredAccount[]>;
 }
 
 /**
@@ -69,14 +93,14 @@ export function parseDiscoverySeed(input: string): DiscoverySeed | null {
 export class MockDiscoveryProvider implements DiscoveryProvider {
   readonly name = "mock";
 
-  async discover(seed: DiscoverySeed): Promise<DiscoveredAccount[]> {
+  async discover(seed: DiscoverySeed, options: DiscoverOptions = {}): Promise<DiscoveredAccount[]> {
     const base = seed.value.replace(/[^a-z0-9]/g, "").slice(0, 20) || "almaty";
     const suffixes =
       seed.type === "HASHTAG"
         ? ["boutique", "store", "shop", "brand", "collection", "atelier", "market", "gallery"]
         : ["official", "store", "shop", "brand", "kz", "almaty", "collection", "boutique"];
 
-    return suffixes.map((suffix) => {
+    const accounts = suffixes.map((suffix) => {
       const handle = `${base}_${suffix}`.slice(0, 30);
       return {
         handle,
@@ -86,6 +110,14 @@ export class MockDiscoveryProvider implements DiscoveryProvider {
         followersCount: null,
       };
     });
+
+    // Mirror production semantics: drop accounts already in the DB and cap to the
+    // target count, so dev behaves like the paginated Apify provider.
+    const targetNew = options.targetNewCount ?? DEFAULT_TARGET_NEW_ACCOUNTS;
+    const known = options.isKnownHandles
+      ? await options.isKnownHandles(accounts.map((account) => account.handle))
+      : new Set<string>();
+    return accounts.filter((account) => !known.has(account.handle)).slice(0, targetNew);
   }
 }
 

@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, SkipForward, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -10,11 +10,13 @@ function Column({
   icon: Icon,
   items,
   showError = false,
+  showCity = false,
 }: {
   title: string;
   icon: LucideIcon;
   items: BoutiqueDTO[];
   showError?: boolean;
+  showCity?: boolean;
 }) {
   return (
     <Card>
@@ -43,6 +45,10 @@ function Column({
                 <div className="truncate text-sm font-medium">{boutique.name}</div>
                 {showError && boutique.telegramError ? (
                   <div className="truncate text-xs text-destructive">{boutique.telegramError}</div>
+                ) : showCity ? (
+                  <div className="truncate text-xs text-muted-foreground">
+                    📍 {boutique.city ?? "Unknown"}
+                  </div>
                 ) : boutique.category ? (
                   <div className="truncate text-xs text-muted-foreground">{boutique.category}</div>
                 ) : null}
@@ -58,16 +64,19 @@ function Column({
 export function TelegramBoard({
   pending,
   published,
+  skipped,
   failed,
 }: {
   pending: BoutiqueDTO[];
   published: BoutiqueDTO[];
+  skipped: BoutiqueDTO[];
   failed: BoutiqueDTO[];
 }) {
   return (
-    <div className="grid gap-4 lg:grid-cols-3">
+    <div className="grid gap-4 lg:grid-cols-4">
       <Column title="Pending publications" icon={Clock} items={pending} />
       <Column title="Published" icon={CheckCircle2} items={published} />
+      <Column title="Skipped (not Almaty)" icon={SkipForward} items={skipped} showCity />
       <Column title="Failed" icon={XCircle} items={failed} showError />
     </div>
   );

@@ -14,11 +14,17 @@ import type {
 export type BoutiqueStatus =
   | "DRAFT"
   | "NEEDS_REVIEW"
+  | "APPROVED"
+  // Legacy Telegram-coupled statuses — migrated to APPROVED + telegramStatus;
+  // retained so rows written before the decoupling still type-check.
   | "READY_TO_PUBLISH"
   | "PUBLISHED"
   | "REJECTED"
   | "TELEGRAM_FAILED"
   | "ARCHIVED";
+
+/** Telegram publishing state, independent of the approval `status`. */
+export type TelegramPublishStatus = "PENDING" | "PUBLISHED" | "SKIPPED" | "FAILED";
 
 /**
  * A single Instagram post captured during import (snapshot, not re-scraped).
@@ -51,6 +57,10 @@ export interface BoutiqueDTO {
   slug: string;
   description: string | null;
   city: string | null;
+  /** Detected administrative region / oblast (optional). */
+  region: string | null;
+  /** Detected country ("Kazakhstan" for recognized KZ cities; null otherwise). */
+  country: string | null;
   status: BoutiqueStatus;
   telegramQueued: boolean;
   avatarUrl: string | null;
@@ -75,6 +85,8 @@ export interface BoutiqueDTO {
   externalUrl: string | null;
   instagramHandle: string | null;
   instagramUrl: string | null;
+  /** Telegram publishing state — independent of `status`. */
+  telegramStatus: TelegramPublishStatus;
   telegramError: string | null;
   posts: BoutiquePost[];
   // Richer Instagram metadata captured at import time (nullable / defaulted so

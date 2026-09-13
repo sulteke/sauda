@@ -1,166 +1,87 @@
 import "server-only";
 
 import { categoryLabel } from "@/lib/category-engine";
+import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import {
+  type PublicationOutcome,
+  type PublicationStatus,
+  publishToTargets,
+} from "@/server/publishing/publication-engine";
+import type { PublishableBoutique } from "@/server/publishing/publication-target";
+import { getTelegramTargets } from "@/server/publishing/telegram-target";
 import type { BoutiquePost } from "@/types";
-import { formatNumber } from "@/utils/format";
 
-const TELEGRAM_API = "https://api.telegram.org";
-const REQUEST_TIMEOUT_MS = 20_000;
-const CAPTION_LIMIT = 1024; // Telegram media-caption max length.
-const MAX_MEDIA = 10; // Telegram sendMediaGroup max items.
-const MAX_HASHTAGS = 5; // Show only the top 3–5 categories.
-
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/**
- * Turns a category label into a Cyrillic-safe Telegram hashtag: splits on spaces
- * and punctuation, capitalizes each word, concatenates, and prefixes "#".
- * E.g. "Худи" → "#Худи", "Головной убор" → "#ГоловнойУбор".
- */
-export function toHashtag(label: string): string {
-  const body = label
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join("");
-  return body ? `#${body}` : "";
-}
-
-/** Shape needed to build a Telegram post — sourced entirely from stored data. */
-export interface PublishableBoutique {
-  name: string;
-  /** Final detected category labels, highest-scoring first. */
-  categories: string[];
-  followersCount: number | null;
-  bio: string | null;
-  instagramUrl: string | null;
-  externalUrl: string | null;
-  avatarUrl: string | null;
-  posts: BoutiquePost[];
-}
-
-export function buildCaption(boutique: PublishableBoutique): string {
-  const lines: string[] = [`<b>${escapeHtml(boutique.name)}</b>`];
-
-  const meta: string[] = [];
-  if (boutique.followersCount != null)
-    meta.push(`${formatNumber(boutique.followersCount)} followers`);
-  if (meta.length > 0) lines.push(meta.join(" · "));
-
-  if (boutique.bio) lines.push(`\n${escapeHtml(boutique.bio)}`);
-
-  const links: string[] = [];
-  // Show "Instagram" as the link text, never the raw URL (the URL stays the href).
-  if (boutique.instagramUrl)
-    links.push(`📷 <a href="${escapeHtml(boutique.instagramUrl)}">Instagram</a>`);
-  if (boutique.externalUrl) links.push(`🌐 ${escapeHtml(boutique.externalUrl)}`);
-  if (links.length > 0) lines.push(`\n${links.join("\n")}`);
-
-  // Categories as hashtags — near the bottom, after the boutique information.
-  const hashtags = boutique.categories.slice(0, MAX_HASHTAGS).map(toHashtag).filter(Boolean);
-  if (hashtags.length > 0) lines.push(`\n🏷 Категориялар\n${hashtags.join(" ")}`);
-
-  const caption = lines.join("\n");
-  return caption.length > CAPTION_LIMIT ? `${caption.slice(0, CAPTION_LIMIT - 1)}…` : caption;
-}
-
-/** Thin wrapper around the Telegram Bot API. Knows nothing about boutiques. */
-class TelegramPublisher {
-  constructor(
-    private readonly token: string,
-    private readonly chatId: string,
-  ) {}
-
-  private async call(method: string, body: Record<string, unknown>): Promise<void> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const res = await fetch(`${TELEGRAM_API}/bot${this.token}/${method}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
-      if (!res.ok || !json.ok) {
-        throw new Error(json.description ?? `Telegram API error (HTTP ${res.status})`);
-      }
-    } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        (error as { name?: unknown }).name === "AbortError"
-      ) {
-        throw new Error(`Telegram request timed out after ${REQUEST_TIMEOUT_MS}ms`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  /** Publishes avatar + up to 6 post images as an album, with a rich caption. */
-  async publish(boutique: PublishableBoutique): Promise<void> {
-    const caption = buildCaption(boutique);
-    const images = [boutique.avatarUrl, ...boutique.posts.slice(0, 6).map((post) => post.imageUrl)]
-      .filter((url): url is string => typeof url === "string" && url.length > 0)
-      .slice(0, MAX_MEDIA);
-
-    if (images.length >= 2) {
-      await this.call("sendMediaGroup", {
-        chat_id: this.chatId,
-        media: images.map((url, index) =>
-          index === 0
-            ? { type: "photo", media: url, caption, parse_mode: "HTML" }
-            : { type: "photo", media: url },
-        ),
-      });
-    } else if (images.length === 1) {
-      await this.call("sendPhoto", {
-        chat_id: this.chatId,
-        photo: images[0],
-        caption,
-        parse_mode: "HTML",
-      });
-    } else {
-      await this.call("sendMessage", { chat_id: this.chatId, text: caption, parse_mode: "HTML" });
-    }
-  }
-}
-
-/** Builds a publisher from the configured bot token + channel id. */
-function getTelegramPublisher(): TelegramPublisher {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHANNEL_ID;
-  if (!token || !chatId) {
-    throw new Error("Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID.");
-  }
-  return new TelegramPublisher(token, chatId);
-}
+// Re-exported for backward compatibility — the Telegram-specific formatting now
+// lives with the Telegram publication target.
+export { buildCaption, toHashtag } from "@/server/publishing/telegram-target";
+export type { PublishableBoutique } from "@/server/publishing/publication-target";
 
 export interface TelegramProcessResult {
   processed: boolean;
   boutiqueId: string | null;
-  status: "PUBLISHED" | "TELEGRAM_FAILED" | null;
+  status: "PUBLISHED" | "SKIPPED" | "FAILED" | null;
   error: string | null;
   remaining: number;
 }
 
-async function countReadyToPublish(): Promise<number> {
-  return prisma.boutique.count({ where: { status: "READY_TO_PUBLISH" } });
+// ---------------------------------------------------------------------------
+// Storage COMPAT boundary.
+//
+// The engine and targets are fully generic; the ONLY Telegram-specific storage
+// assumption left is that we collapse per-target outcomes into the single
+// `telegramStatus` column. Everything that ties publication to that column lives
+// in this section. When a generic per-target publications table is introduced,
+// replace just these helpers (selection, count, reduce, record) with reads/
+// writes against that table — the engine, targets, and driver stay unchanged.
+// ---------------------------------------------------------------------------
+
+/** Approved boutiques still awaiting a publishing decision (telegramStatus=PENDING). */
+async function countPendingPublish(): Promise<number> {
+  return prisma.boutique.count({ where: { status: "APPROVED", telegramStatus: "PENDING" } });
 }
 
+/** Collapses per-target outcomes into the single status we persist today. */
+function reduceOutcomes(outcomes: PublicationOutcome[]): {
+  status: PublicationStatus;
+  error: string | null;
+} {
+  const failed = outcomes.find((outcome) => outcome.status === "FAILED");
+  if (failed) return { status: "FAILED", error: failed.error };
+  const published = outcomes.some((outcome) => outcome.status === "PUBLISHED");
+  return { status: published ? "PUBLISHED" : "SKIPPED", error: null };
+}
+
+/** Persists the reduced outcome onto the boutique (never touches approval `status`). */
+async function recordOutcome(
+  boutiqueId: string,
+  reduced: { status: PublicationStatus; error: string | null },
+): Promise<void> {
+  await prisma.boutique.update({
+    where: { id: boutiqueId },
+    data: { telegramStatus: reduced.status, telegramError: reduced.error },
+  });
+}
+
+// ---------------------------------------------------------------------------
+
 /**
- * Publishes the oldest READY_TO_PUBLISH boutique to Telegram using ONLY stored
- * data (no re-scrape). Marks PUBLISHED on success, TELEGRAM_FAILED + error on
- * failure. Never throws — the queue keeps moving.
+ * Publication driver — a step fully INDEPENDENT of approval. It picks the oldest
+ * APPROVED boutique still awaiting publication, runs it through the target-driven
+ * {@link publishToTargets} engine, and records the result. The driver itself
+ * contains NO destination logic: which targets exist, whether a boutique is
+ * eligible, and how to publish all live behind the PublicationTarget seam. Today
+ * the only registered target is the Almaty Telegram channel, so this reduces to
+ * the existing behaviour (Almaty → PUBLISHED, other cities → SKIPPED, publish
+ * error → FAILED). Uses ONLY stored data (no re-scrape) and never throws.
+ *
+ * Adding channels, cities, or entirely new targets (Website, Instagram,
+ * WhatsApp, Email) means registering a target — not editing this driver, the
+ * approval workflow, or the import pipeline.
  */
 export async function processNextTelegramPost(): Promise<TelegramProcessResult> {
   const next = await prisma.boutique.findFirst({
-    where: { status: "READY_TO_PUBLISH" },
+    where: { status: "APPROVED", telegramStatus: "PENDING" },
     orderBy: { createdAt: "asc" },
   });
 
@@ -175,42 +96,38 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
     .map((id) => categoryLabel(id))
     .filter((label): label is string => label !== null);
 
-  try {
-    const publisher = getTelegramPublisher();
-    await publisher.publish({
-      name: next.name,
-      categories,
-      followersCount: next.followersCount,
-      bio: next.bio,
-      instagramUrl: next.instagramUrl,
-      externalUrl: next.externalUrl,
-      avatarUrl: next.avatarUrl,
-      posts,
-    });
+  const boutique: PublishableBoutique = {
+    id: next.id,
+    name: next.name,
+    city: next.city,
+    categories,
+    followersCount: next.followersCount,
+    bio: next.bio,
+    instagramUrl: next.instagramUrl,
+    externalUrl: next.externalUrl,
+    avatarUrl: next.avatarUrl,
+    posts,
+  };
 
-    await prisma.boutique.update({
-      where: { id: next.id },
-      data: { status: "PUBLISHED", telegramError: null },
-    });
-    return {
-      processed: true,
+  // Target-driven: the engine runs every registered target and reports outcomes.
+  const outcomes = await publishToTargets(boutique, getTelegramTargets());
+  for (const outcome of outcomes) {
+    logger.info("publication.outcome", {
       boutiqueId: next.id,
-      status: "PUBLISHED",
-      error: null,
-      remaining: await countReadyToPublish(),
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Telegram publish failed";
-    await prisma.boutique.update({
-      where: { id: next.id },
-      data: { status: "TELEGRAM_FAILED", telegramError: message },
+      target: outcome.targetId,
+      status: outcome.status,
+      ...(outcome.error ? { error: outcome.error } : {}),
     });
-    return {
-      processed: true,
-      boutiqueId: next.id,
-      status: "TELEGRAM_FAILED",
-      error: message,
-      remaining: await countReadyToPublish(),
-    };
   }
+
+  const reduced = reduceOutcomes(outcomes);
+  await recordOutcome(next.id, reduced);
+
+  return {
+    processed: true,
+    boutiqueId: next.id,
+    status: reduced.status,
+    error: reduced.error,
+    remaining: await countPendingPublish(),
+  };
 }

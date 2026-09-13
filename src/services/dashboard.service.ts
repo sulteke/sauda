@@ -14,7 +14,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     const [totalBoutiques, needReview, published, telegramQueue] = await Promise.all([
       prisma.boutique.count(),
       prisma.boutique.count({ where: { status: BoutiqueStatus.NEEDS_REVIEW } }),
-      prisma.boutique.count({ where: { status: BoutiqueStatus.PUBLISHED } }),
+      // "Published" now means published to Telegram — tracked independently of
+      // the approval status.
+      prisma.boutique.count({ where: { telegramStatus: "PUBLISHED" } }),
       prisma.boutique.count({ where: { telegramQueued: true } }),
     ]);
 

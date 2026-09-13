@@ -29,6 +29,7 @@ import { BusinessInfo, hasEnrichmentData } from "@/features/boutiques/components
 import { CategoryEditor } from "@/features/boutiques/components/category-editor";
 import { BOUTIQUE_STATUS_LABELS } from "@/features/boutiques/schemas";
 import { ALL_PRODUCT_CATEGORIES } from "@/lib/category-engine";
+import { isAlmaty } from "@/lib/location";
 import type { BoutiqueDTO, BoutiquePost, InstagramBusinessAddress } from "@/types";
 import { formatDate, formatNumber } from "@/utils/format";
 
@@ -160,6 +161,7 @@ function PostTile({ post }: { post: BoutiquePost }) {
 export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
   const posts = boutique.posts.slice(0, 6);
   const importedAt = boutique.lastImportedAt ?? boutique.createdAt;
+  const telegramEligible = isAlmaty(boutique.city);
   const address = boutique.businessAddress;
   const addressLine = address ? formatAddress(address) : "";
   // The single `externalUrl` is already shown as "Website"; list any extras here.
@@ -202,6 +204,11 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
                 </Badge>
               ) : null}
               {boutique.isPrivate ? <Badge variant="outline">Private</Badge> : null}
+              {!telegramEligible ? (
+                <Badge variant="outline" className="border-amber-500/50 text-amber-600">
+                  Not eligible for Telegram publication
+                </Badge>
+              ) : null}
             </div>
             <InstagramLink url={boutique.instagramUrl} />
           </div>
@@ -215,6 +222,9 @@ export function BoutiqueDetails({ boutique }: { boutique: BoutiqueDTO }) {
           )}
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <InfoRow icon={MapPin} label="Location">
+              📍 {boutique.city ?? "Unknown"}
+            </InfoRow>
             <InfoRow icon={Tag} label="Category">
               {boutique.category ?? "—"}
             </InfoRow>

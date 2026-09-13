@@ -12,9 +12,15 @@ datasource db {
 }
 
 /// Lifecycle of a boutique inside the admin review pipeline.
+///
+/// APPROVED means the admin accepted the boutique for the platform (it is
+/// website-visible) but it is NOT eligible for Telegram — used when a boutique
+/// is outside Almaty. Almaty boutiques go straight to READY_TO_PUBLISH instead.
+/// Location never removes a boutique; it only gates Telegram publication.
 enum BoutiqueStatus {
   DRAFT
   NEEDS_REVIEW
+  APPROVED
   READY_TO_PUBLISH
   PUBLISHED
   REJECTED
@@ -26,6 +32,22 @@ enum BoutiqueStatus {
 /// pipeline is source-agnostic so new sources slot in without schema churn.
 enum ImportSource {
   INSTAGRAM
+}
+
+/// Telegram publishing state — INDEPENDENT of the approval `status`. Approval
+/// accepts a boutique into the platform; publishing is a separate step that
+/// decides per-boutique whether to post (today: only Almaty). Keeping them
+/// decoupled lets us add more cities, channels, or publishing targets later
+/// without touching the approval workflow.
+///   PENDING   — approved, not yet processed by the Telegram step
+///   PUBLISHED — posted to the channel
+///   SKIPPED   — processed, intentionally not posted (e.g. not Almaty)
+///   FAILED    — a publish attempt failed (retryable)
+enum TelegramPublishStatus {
+  PENDING
+  PUBLISHED
+  SKIPPED
+  FAILED
 }
 
 /// Lifecycle of an import job. Designed to be driven by an async worker at
@@ -48,6 +70,10 @@ model Boutique {
   description    String?
   city           String?
   status         BoutiqueStatus @default(DRAFT)
+  /// Detected administrative region / oblast (optional; reserved for future use).
+  region         String?
+  /// Detected country (e.g. "Kazakhstan"). Null when the city is unrecognized.
+  country        String?
   instagramHandle String?       @unique @map("instagram_handle")
   instagramUrl   String?        @map("instagram_url")
   avatarUrl      String?        @map("avatar_url")
@@ -91,6 +117,10 @@ model Boutique {
   relatedProfiles   Json?    @map("related_profiles")
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
   telegramQueued Boolean        @default(false) @map("telegram_queued")
+  /// Telegram publishing state — independent of the approval `status`. The
+  /// publisher decides whether to post (by city) and records the outcome here;
+  /// approval never changes it and it never changes approval.
+  telegramStatus TelegramPublishStatus @default(PENDING) @map("telegram_status")
   /// Failure reason from the last Telegram publish attempt (null on success).
   telegramError  String?        @map("telegram_error")
   createdAt      DateTime       @default(now()) @map("created_at")
@@ -100,6 +130,7 @@ model Boutique {
 
   @@index([status])
   @@index([telegramQueued])
+  @@index([telegramStatus])
   @@map("boutiques")
 }
 

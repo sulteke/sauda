@@ -15,9 +15,12 @@ import { categoryLabel, resolveProductCategories } from "@/lib/category-engine";
 import { prisma } from "@/lib/prisma";
 import type { BoutiqueDTO } from "@/types";
 
-// A boutique is public once the admin has approved it in the review pipeline.
+// A boutique is public once the admin has APPROVED it — independent of whether
+// it was (or will be) published to Telegram. The legacy READY_TO_PUBLISH /
+// PUBLISHED statuses are kept only for rows not yet migrated to the decoupled
+// model (the migration collapses them to APPROVED).
 const PUBLIC_WHERE: Prisma.BoutiqueWhereInput = {
-  status: { in: ["READY_TO_PUBLISH", "PUBLISHED"] },
+  status: { in: ["APPROVED", "READY_TO_PUBLISH", "PUBLISHED"] },
 };
 
 /** Public-facing view of a boutique (dates as ISO strings). Read-only. */
@@ -28,6 +31,8 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     slug: row.slug,
     description: row.description,
     city: row.city,
+    region: row.region,
+    country: row.country,
     status: row.status,
     telegramQueued: row.telegramQueued,
     avatarUrl: row.avatarUrl,
@@ -44,6 +49,7 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     externalUrl: row.externalUrl,
     instagramHandle: row.instagramHandle,
     instagramUrl: row.instagramUrl,
+    telegramStatus: row.telegramStatus,
     telegramError: row.telegramError,
     posts: parsePosts(row.posts),
     isVerified: row.isVerified,
