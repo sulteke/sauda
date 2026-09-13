@@ -23,8 +23,15 @@ export function QueueHeaderActions() {
   const [confirmAllOpen, setConfirmAllOpen] = useState(false);
 
   const items = data ?? [];
-  const completedCount = items.filter((item) => item.status === "COMPLETED").length;
-  const failedCount = items.filter((item) => item.status === "FAILED").length;
+  const completedCount = items.filter(
+    (item) => item.status === "READY_FOR_REVIEW" || item.status === "COMPLETED",
+  ).length;
+  const failedCount = items.filter(
+    (item) =>
+      item.status === "PARSE_FAILED" ||
+      item.status === "ANALYSIS_FAILED" ||
+      item.status === "FAILED",
+  ).length;
   const total = items.length;
 
   async function run(scope: ClearQueueScope) {

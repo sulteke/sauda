@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DeleteQueueItemButton } from "@/features/queue/components/delete-queue-item-button";
+import { RetryQueueItemButton } from "@/features/queue/components/retry-queue-item-button";
 import {
   Table,
   TableBody,
@@ -20,6 +21,14 @@ import type { ImportQueueStatus } from "@/types";
 import { formatDate } from "@/utils/format";
 
 const STATUS_LABEL: Record<ImportQueueStatus, string> = {
+  PENDING_PARSE: "Queued (parse)",
+  PARSING: "Parsing",
+  PENDING_ANALYSIS: "Queued (analysis)",
+  ANALYZING: "Analyzing",
+  READY_FOR_REVIEW: "Ready for review",
+  PARSE_FAILED: "Parse failed",
+  ANALYSIS_FAILED: "Analysis failed",
+  // Legacy (pre two-stage split).
   PENDING: "Pending",
   PROCESSING: "Processing",
   COMPLETED: "Completed",
@@ -30,11 +39,26 @@ const STATUS_VARIANT: Record<
   ImportQueueStatus,
   "default" | "secondary" | "outline" | "destructive"
 > = {
+  PENDING_PARSE: "outline",
+  PARSING: "secondary",
+  PENDING_ANALYSIS: "outline",
+  ANALYZING: "secondary",
+  READY_FOR_REVIEW: "default",
+  PARSE_FAILED: "destructive",
+  ANALYSIS_FAILED: "destructive",
+  // Legacy (pre two-stage split).
   PENDING: "outline",
   PROCESSING: "secondary",
   COMPLETED: "default",
   FAILED: "destructive",
 };
+
+/** Failed statuses that can be retried from the row. */
+const RETRYABLE: ReadonlySet<ImportQueueStatus> = new Set([
+  "PARSE_FAILED",
+  "ANALYSIS_FAILED",
+  "FAILED",
+]);
 
 export function QueueTable() {
   const { data, isLoading, isError } = useQueue();
@@ -104,7 +128,10 @@ export function QueueTable() {
                 {formatDate(item.createdAt)}
               </TableCell>
               <TableCell className="text-right">
-                <DeleteQueueItemButton id={item.id} />
+                <div className="flex items-center justify-end gap-1">
+                  {RETRYABLE.has(item.status) && <RetryQueueItemButton id={item.id} />}
+                  <DeleteQueueItemButton id={item.id} />
+                </div>
               </TableCell>
             </TableRow>
           ))}

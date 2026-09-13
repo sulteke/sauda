@@ -5,7 +5,7 @@ import type { ImportQueue } from "@prisma/client";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
-import { analyzeInstagramProfile, saveBoutiqueFromImport } from "@/services/import.service";
+import { analyzeImportJob, parseInstagramProfile } from "@/services/import.service";
 import type { ImportQueueItemDTO } from "@/types";
 
 function toDTO(row: ImportQueue): ImportQueueItemDTO {
@@ -58,12 +58,29 @@ export async function deleteQueueItem(id: string): Promise<{ deleted: number }> 
   return { deleted: count };
 }
 
+/** Statuses that represent a fully-imported boutique (new + legacy). */
+const SUCCESS_STATUSES = ["READY_FOR_REVIEW", "COMPLETED"] as const;
+/** Stage-scoped + legacy failure statuses. */
+const FAILED_STATUSES = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"] as const;
+/** Statuses with work still to do (not yet complete, not failed). */
+const ACTIONABLE_STATUSES = [
+  "PENDING_PARSE",
+  "PARSING",
+  "PENDING_ANALYSIS",
+  "ANALYZING",
+] as const;
+
 /** What a bulk clear targets. "ALL" removes every row regardless of status. */
 export type ClearQueueScope = "COMPLETED" | "FAILED" | "ALL";
 
 /** Permanently deletes queue rows matching the scope. Returns how many were removed. */
 export async function clearQueue(scope: ClearQueueScope): Promise<{ deleted: number }> {
-  const where = scope === "ALL" ? {} : { status: scope };
+  const where =
+    scope === "ALL"
+      ? {}
+      : scope === "COMPLETED"
+        ? { status: { in: [...SUCCESS_STATUSES] } }
+        : { status: { in: [...FAILED_STATUSES] } };
   const { count } = await prisma.importQueue.deleteMany({ where });
   return { deleted: count };
 }
@@ -74,94 +91,154 @@ export interface ProcessResult {
   remaining: number;
 }
 
-/** A job stuck in PROCESSING longer than this is treated as dead and re-queued. */
+/** A job stuck mid-stage longer than this is treated as dead and re-queued. */
 const STALE_PROCESSING_MS = 10 * 60 * 1000; // 10 minutes
 
+/** In-flight states and the pending state each reverts to on stale recovery. */
+const IN_FLIGHT_RECOVERY = [
+  { from: "PARSING", to: "PENDING_PARSE", stage: "parse" },
+  { from: "ANALYZING", to: "PENDING_ANALYSIS", stage: "analyze" },
+] as const;
+
 /**
- * Recovers jobs orphaned in PROCESSING (e.g. the serverless function was killed
- * by a Vercel timeout before it could mark COMPLETED/FAILED). Any PROCESSING job
- * whose last update is older than STALE_PROCESSING_MS is reset to PENDING so it
- * is picked up again. No real import runs longer than the function limit, so the
+ * Recovers jobs orphaned mid-stage (e.g. the serverless function was killed by a
+ * Vercel timeout before it could land a terminal status). Any PARSING/ANALYZING
+ * job whose last update is older than STALE_PROCESSING_MS reverts to its pending
+ * state (PENDING_PARSE / PENDING_ANALYSIS) so that stage is retried — a stuck
+ * ANALYZING job reverts to PENDING_ANALYSIS, so it re-runs Gemini only and never
+ * re-scrapes. No real stage runs longer than the function limit, so the
  * threshold never touches a genuinely in-flight job.
  */
 export async function requeueStaleJobs(): Promise<number> {
   const threshold = new Date(Date.now() - STALE_PROCESSING_MS);
-  const where = { status: "PROCESSING" as const, updatedAt: { lt: threshold } };
+  let total = 0;
 
-  const stale = await prisma.importQueue.findMany({
-    where,
-    select: { id: true, instagramUrl: true, updatedAt: true },
-  });
-  if (stale.length === 0) return 0;
+  for (const { from, to, stage } of IN_FLIGHT_RECOVERY) {
+    const where = { status: from, updatedAt: { lt: threshold } };
+    const stale = await prisma.importQueue.findMany({
+      where,
+      select: { id: true, instagramUrl: true, updatedAt: true },
+    });
+    if (stale.length === 0) continue;
 
-  logger.warn("queue.stale_job_detected", {
-    count: stale.length,
-    thresholdMinutes: STALE_PROCESSING_MS / 60_000,
-    jobs: stale.map((job) => ({
-      id: job.id,
-      instagramUrl: job.instagramUrl,
-      stuckForMs: Date.now() - job.updatedAt.getTime(),
-    })),
-  });
+    logger.warn("queue.stale_job_detected", {
+      stage,
+      count: stale.length,
+      thresholdMinutes: STALE_PROCESSING_MS / 60_000,
+      jobs: stale.map((job) => ({
+        id: job.id,
+        instagramUrl: job.instagramUrl,
+        stuckForMs: Date.now() - job.updatedAt.getTime(),
+      })),
+    });
 
-  const { count } = await prisma.importQueue.updateMany({ where, data: { status: "PENDING" } });
-  logger.info("queue.job_requeued", { count, ids: stale.map((job) => job.id) });
-  return count;
+    const { count } = await prisma.importQueue.updateMany({ where, data: { status: to } });
+    logger.info("queue.job_requeued", { stage, count, ids: stale.map((job) => job.id) });
+    total += count;
+  }
+
+  return total;
 }
 
 /**
- * Processes the oldest PENDING queue item through the EXISTING import pipeline
- * (analyze → save). Marks COMPLETED, or FAILED with the error. No import logic
- * is duplicated here — it only orchestrates the queue lifecycle.
+ * Re-queues a failed item for its OWN stage, so retries are independent:
+ *   PARSE_FAILED    → PENDING_PARSE     (re-scrapes via Apify)
+ *   ANALYSIS_FAILED → PENDING_ANALYSIS  (re-runs Gemini only — never re-scrapes)
+ *   FAILED (legacy) → PENDING_PARSE     (restart from scratch)
+ * Throws if the item is missing or not in a retryable state.
  */
-export async function processNextImport(): Promise<ProcessResult> {
-  // Recover any jobs left stuck in PROCESSING (killed mid-run) before selecting
-  // the next job, so a timed-out job is retried instead of being lost.
-  await requeueStaleJobs();
-
-  const next = await prisma.importQueue.findFirst({
-    where: { status: "PENDING" },
-    orderBy: { createdAt: "asc" },
-  });
-
-  if (!next) {
-    // No PENDING jobs left — this call drained the queue.
-    logger.info("queue.finished", { reason: "no-pending-jobs" });
-    return { processed: false, item: null, remaining: 0 };
+export async function retryQueueItem(id: string): Promise<ImportQueueItemDTO> {
+  const row = await prisma.importQueue.findUnique({ where: { id } });
+  if (!row) {
+    throw new Error("Queue item not found.");
   }
 
-  // Next pending job selected + started.
-  logger.info("queue.job_selected", { id: next.id, instagramUrl: next.instagramUrl });
-  await prisma.importQueue.update({ where: { id: next.id }, data: { status: "PROCESSING" } });
+  const target =
+    row.status === "PARSE_FAILED"
+      ? "PENDING_PARSE"
+      : row.status === "ANALYSIS_FAILED"
+        ? "PENDING_ANALYSIS"
+        : row.status === "FAILED"
+          ? "PENDING_PARSE"
+          : null;
+
+  if (!target) {
+    throw new Error(`Cannot retry a queue item in status ${row.status}.`);
+  }
+
+  const updated = await prisma.importQueue.update({
+    where: { id },
+    data: { status: target, error: null },
+  });
+  logger.info("queue.retry", { id, from: row.status, to: target });
+  return toDTO(updated);
+}
+
+/**
+ * Advances the queue by exactly ONE stage of ONE item, so no single invocation
+ * combines the slow Apify scrape (Parse) with the Gemini analysis (Analyze) —
+ * each call stays well under the serverless function limit. The browser driver
+ * calls this repeatedly while `remaining > 0`.
+ *
+ * Priority: finish analysis before starting new parses, so boutiques reach
+ * READY_FOR_REVIEW one at a time rather than leaving many half-done. Stale
+ * in-flight jobs are recovered first. A successful Parse hands straight off to
+ * PENDING_ANALYSIS, so there is no intermediate resting state to promote.
+ */
+export async function processNextImport(): Promise<ProcessResult> {
+  await requeueStaleJobs();
+
+  // Stage 2 first — drain analysis.
+  const analyzeRow = await prisma.importQueue.findFirst({
+    where: { status: "PENDING_ANALYSIS" },
+    orderBy: { createdAt: "asc" },
+  });
+  if (analyzeRow) return runAnalyzeStage(analyzeRow.id, analyzeRow.instagramUrl, analyzeRow.importJobId);
+
+  // Stage 1 — start the next parse.
+  const parseRow = await prisma.importQueue.findFirst({
+    where: { status: "PENDING_PARSE" },
+    orderBy: { createdAt: "asc" },
+  });
+  if (parseRow) return runParseStage(parseRow.id, parseRow.instagramUrl);
+
+  logger.info("queue.finished", { reason: "no-actionable-jobs" });
+  return { processed: false, item: null, remaining: 0 };
+}
+
+/**
+ * Parse stage: Apify fetch + keyword-only persist. On success hands straight off
+ * to the analysis stage. PARSING → PENDING_ANALYSIS / PARSE_FAILED.
+ */
+async function runParseStage(id: string, instagramUrl: string): Promise<ProcessResult> {
+  logger.info("queue.parse_selected", { id, instagramUrl });
+  await prisma.importQueue.update({ where: { id }, data: { status: "PARSING" } });
   const startedAt = Date.now();
-  logger.info("queue.job_started", { id: next.id, instagramUrl: next.instagramUrl });
 
   try {
-    const job = await analyzeInstagramProfile({ url: next.instagramUrl, userId: null });
-    await saveBoutiqueFromImport(job.id);
-
+    const { job } = await parseInstagramProfile({ url: instagramUrl, userId: null });
     const updated = await prisma.importQueue.update({
-      where: { id: next.id },
-      data: { status: "COMPLETED", error: null },
+      where: { id },
+      data: { status: "PENDING_ANALYSIS", importJobId: job.id, error: null },
     });
-    const remaining = await countPending();
-    logger.info("queue.job_finished", {
-      id: next.id,
-      status: "COMPLETED",
+    const remaining = await countRemaining();
+    logger.info("queue.parse_finished", {
+      id,
+      status: "PENDING_ANALYSIS",
       durationMs: Date.now() - startedAt,
       remaining,
     });
     return { processed: true, item: toDTO(updated), remaining };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Import failed";
+    const message = error instanceof Error ? error.message : "Parse failed";
     const updated = await prisma.importQueue.update({
-      where: { id: next.id },
-      data: { status: "FAILED", error: message },
+      where: { id },
+      data: { status: "PARSE_FAILED", error: message },
     });
-    const remaining = await countPending();
-    logger.warn("queue.job_finished", {
-      id: next.id,
-      status: "FAILED",
+    const remaining = await countRemaining();
+    logger.warn("queue.parse_finished", {
+      id,
+      status: "PARSE_FAILED",
       durationMs: Date.now() - startedAt,
       remaining,
       error: message,
@@ -170,6 +247,64 @@ export async function processNextImport(): Promise<ProcessResult> {
   }
 }
 
-async function countPending(): Promise<number> {
-  return prisma.importQueue.count({ where: { status: "PENDING" } });
+/**
+ * Analyze stage: reloads the parsed payload and runs Gemini (NO Apify).
+ * PENDING_ANALYSIS → ANALYZING → READY_FOR_REVIEW / ANALYSIS_FAILED.
+ */
+async function runAnalyzeStage(
+  id: string,
+  instagramUrl: string,
+  importJobId: string | null,
+): Promise<ProcessResult> {
+  logger.info("queue.analyze_selected", { id, instagramUrl });
+  await prisma.importQueue.update({ where: { id }, data: { status: "ANALYZING" } });
+  const startedAt = Date.now();
+
+  if (!importJobId) {
+    // No linked parse job (e.g. a legacy row) — can't analyze without re-parsing.
+    const message = "No parsed import job linked; re-parse required.";
+    const updated = await prisma.importQueue.update({
+      where: { id },
+      data: { status: "ANALYSIS_FAILED", error: message },
+    });
+    const remaining = await countRemaining();
+    logger.warn("queue.analyze_finished", { id, status: "ANALYSIS_FAILED", remaining, error: message });
+    return { processed: true, item: toDTO(updated), remaining };
+  }
+
+  try {
+    await analyzeImportJob(importJobId);
+    const updated = await prisma.importQueue.update({
+      where: { id },
+      data: { status: "READY_FOR_REVIEW", error: null },
+    });
+    const remaining = await countRemaining();
+    logger.info("queue.analyze_finished", {
+      id,
+      status: "READY_FOR_REVIEW",
+      durationMs: Date.now() - startedAt,
+      remaining,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Analysis failed";
+    const updated = await prisma.importQueue.update({
+      where: { id },
+      data: { status: "ANALYSIS_FAILED", error: message },
+    });
+    const remaining = await countRemaining();
+    logger.warn("queue.analyze_finished", {
+      id,
+      status: "ANALYSIS_FAILED",
+      durationMs: Date.now() - startedAt,
+      remaining,
+      error: message,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
+  }
+}
+
+/** Count of items still needing work (any stage before a terminal status). */
+async function countRemaining(): Promise<number> {
+  return prisma.importQueue.count({ where: { status: { in: [...ACTIONABLE_STATUSES] } } });
 }

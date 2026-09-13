@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AiCategoryRequest } from "@/lib/ai-category-provider";
+import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-category-provider";
 
 import {
   DEFAULT_GEMINI_MODEL,
@@ -174,6 +174,32 @@ describe("GeminiCategoryProvider", () => {
       request(),
     );
     expect(result.categories).toEqual([]);
+  });
+
+  it("throwOnFailure: throws AiCategoryProviderError with the status on a terminal non-OK", async () => {
+    fetchMock.mockResolvedValue(errorResponse(400, '{"error":{"code":400}}'));
+
+    const provider = new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 1,
+      throwOnFailure: true,
+    });
+
+    await expect(provider.analyze(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
+    await expect(provider.analyze(request())).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("throwOnFailure: throws after exhausting retries on a network error", async () => {
+    fetchMock.mockRejectedValue(new Error("network down"));
+
+    const provider = new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      throwOnFailure: true,
+    });
+
+    await expect(provider.analyze(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
   });
 });
 

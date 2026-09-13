@@ -2,6 +2,7 @@ import "server-only";
 
 import {
   type AiCategoryProvider,
+  AiCategoryProviderError,
   type AiCategoryRequest,
   type AiCategoryResult,
   buildAiCategoryPrompt,
@@ -35,6 +36,13 @@ export interface GeminiProviderOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   retryDelayMs?: number;
+  /**
+   * When true, a terminal failure throws `AiCategoryProviderError` instead of
+   * degrading to an empty result. The import queue's Analyze stage opts in so a
+   * Gemini outage becomes a retryable ANALYSIS_FAILED rather than a silent
+   * keyword-only boutique. Defaults to false (graceful degradation).
+   */
+  throwOnFailure?: boolean;
 }
 
 interface GeminiUsage {
@@ -57,9 +65,11 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
+  private readonly throwOnFailure: boolean;
 
   constructor(apiKey: string, options: GeminiProviderOptions = {}) {
     this.apiKey = apiKey;
+    this.throwOnFailure = options.throwOnFailure ?? false;
     this.model = options.model ?? process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     const envTimeout = Number(process.env.GEMINI_TIMEOUT_MS);
@@ -76,6 +86,21 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
   /** The API key lives only in the query string; never log this URL. */
   private endpoint(): string {
     return `${this.baseUrl}/v1beta/models/${this.model}:generateContent?key=${this.apiKey}`;
+  }
+
+  /**
+   * Terminal outcome of a failed request: throw when the caller opted into
+   * strict mode, otherwise degrade to an empty result (the historical default).
+   */
+  private fail(reason: { status?: number; message: string; cause?: unknown }): AiCategoryResult {
+    if (this.throwOnFailure) {
+      throw new AiCategoryProviderError(reason.message, {
+        provider: this.name,
+        status: reason.status,
+        cause: reason.cause,
+      });
+    }
+    return { ...EMPTY_AI_RESULT };
   }
 
   async analyze(request: AiCategoryRequest): Promise<AiCategoryResult> {
@@ -142,8 +167,15 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
           attempt,
           durationMs,
         });
-        return { ...EMPTY_AI_RESULT };
+        return this.fail({
+          status: response.status,
+          message: `Gemini request failed (${response.status} ${response.statusText})`,
+        });
       } catch (error) {
+        // A strict-mode failure we raised for a non-OK response must bubble out
+        // as-is (with its status), not be rewrapped as a transport error.
+        if (error instanceof AiCategoryProviderError) throw error;
+
         const durationMs = Date.now() - startedAt;
         const message = error instanceof Error ? error.message : String(error);
         if (attempt < this.maxAttempts) {
@@ -165,7 +197,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
           attempt,
           durationMs,
         });
-        return { ...EMPTY_AI_RESULT };
+        return this.fail({ message: `Gemini request error: ${message}`, cause: error });
       } finally {
         clearTimeout(timeout);
       }
@@ -181,14 +213,17 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
  * This is the single place the real provider is selected. `apiKeyLength` helps
  * catch a truncated / whitespace-padded key without ever logging the value.
  */
-export function resolveAiCategoryProvider(): AiCategoryProvider {
+export function resolveAiCategoryProvider(
+  options: { throwOnFailure?: boolean } = {},
+): AiCategoryProvider {
   const apiKey = process.env.GEMINI_API_KEY;
   logger.info("gemini.provider_selected", {
     provider: apiKey ? "gemini" : "disabled",
     apiKeyDetected: Boolean(apiKey),
     apiKeyLength: (apiKey ?? "").length,
     model: apiKey ? (process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL) : null,
+    throwOnFailure: Boolean(options.throwOnFailure),
   });
   if (!apiKey) return disabledAiCategoryProvider;
-  return new GeminiCategoryProvider(apiKey);
+  return new GeminiCategoryProvider(apiKey, { throwOnFailure: options.throwOnFailure });
 }

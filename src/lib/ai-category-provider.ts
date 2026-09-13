@@ -82,6 +82,26 @@ export interface AiCategoryProvider {
   analyze(request: AiCategoryRequest): Promise<AiCategoryResult>;
 }
 
+/**
+ * Raised when a real AI provider fails terminally (transport error, timeout, or
+ * a non-recoverable API status after retries). Providers degrade GRACEFULLY by
+ * default — `analyze()` returns an empty result so a flaky model never crashes
+ * an import. A caller that needs to treat a failure as a retryable error (e.g.
+ * the queue's independent Analyze stage) opts into throwing instead; this type
+ * lets it distinguish a real outage from a genuinely empty result.
+ */
+export class AiCategoryProviderError extends Error {
+  readonly provider: string;
+  readonly status?: number;
+
+  constructor(message: string, options: { provider: string; status?: number; cause?: unknown }) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "AiCategoryProviderError";
+    this.provider = options.provider;
+    this.status = options.status;
+  }
+}
+
 /** Default provider: no model connected, so it contributes nothing. */
 export const disabledAiCategoryProvider: AiCategoryProvider = {
   name: "disabled",

@@ -135,20 +135,45 @@ model ImportJob {
   @@map("import_jobs")
 }
 
-/// Lifecycle of a queued bulk-import URL.
+/// Lifecycle of a queued bulk-import URL. The import runs as TWO independent
+/// stages so no single serverless invocation combines the slow Apify scrape
+/// with the Gemini analysis (which together can exceed the platform timeout):
+///
+///   Stage 1 — Parse   : PENDING_PARSE → PARSING → PENDING_ANALYSIS (Apify only, no AI)
+///   Stage 2 — Analyze : PENDING_ANALYSIS → ANALYZING → READY_FOR_REVIEW (Gemini only)
+///
+/// Parse hands straight off to PENDING_ANALYSIS on success. Failures are
+/// stage-scoped and retryable independently: PARSE_FAILED re-runs the scrape;
+/// ANALYSIS_FAILED re-runs only Gemini (the parsed data is reused, so Apify is
+/// NEVER repeated once Parse has succeeded).
+///
+/// The legacy PENDING/PROCESSING/COMPLETED/FAILED values are retained only so
+/// rows written before the two-stage split stay valid; new rows never use them.
 enum ImportQueueStatus {
+  PENDING_PARSE
+  PARSING
+  PENDING_ANALYSIS
+  ANALYZING
+  READY_FOR_REVIEW
+  PARSE_FAILED
+  ANALYSIS_FAILED
+  // Legacy (pre two-stage split) — kept for backward compatibility only.
   PENDING
   PROCESSING
   COMPLETED
   FAILED
 }
 
-/// A bulk-import work item: one pasted Instagram URL waiting to be run through
-/// the existing import pipeline. Processed oldest-first by processNextImport().
+/// A bulk-import work item: one pasted Instagram URL driven through the
+/// two-stage import pipeline. Processed oldest-first by processNextImport(),
+/// one stage per call. `importJobId` links to the ImportJob created by Parse,
+/// so Analyze can reload the parsed profile/posts without re-scraping.
 model ImportQueue {
   id           String            @id @default(uuid())
   instagramUrl String            @map("instagram_url")
-  status       ImportQueueStatus @default(PENDING)
+  status       ImportQueueStatus @default(PENDING_PARSE)
+  /// ImportJob produced by the Parse stage (holds the raw profile + preview).
+  importJobId  String?           @map("import_job_id")
   error        String?
   createdAt    DateTime          @default(now()) @map("created_at")
   updatedAt    DateTime          @updatedAt @map("updated_at")

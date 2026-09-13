@@ -1,7 +1,8 @@
 import "server-only";
 
-import { Prisma, type ImportJob } from "@prisma/client";
+import { type Boutique, Prisma, type ImportJob } from "@prisma/client";
 
+import { disabledAiCategoryProvider } from "@/lib/ai-category-provider";
 import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
@@ -177,9 +178,90 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
 }
 
 /**
- * Stage 2 — persist. Turns a reviewed preview into a Boutique. Idempotent by
- * Instagram handle: re-importing the same profile links to the existing boutique
- * instead of creating a duplicate (critical at 100k+ scale).
+ * Upserts a Boutique from a normalized preview. Idempotent by Instagram handle:
+ * re-importing the same profile updates the existing boutique instead of
+ * creating a duplicate (critical at 100k+ scale). Re-import refreshes ONLY the
+ * imported/enrichment fields; manually-owned fields (name, city, status) and
+ * manual category overrides (Stage 3) are never overwritten.
+ *
+ * `preserveExistingAiCategories` guards the two-stage flow: the keyword-only
+ * Parse stage passes `true` so re-parsing a boutique that already has AI results
+ * does NOT downgrade its categories/aiResult to keyword-only before Analyze
+ * re-runs. Analyze (and the single-shot interactive persist) pass `false` and
+ * write their authoritative categories.
+ */
+async function upsertBoutiqueFromPreview(
+  preview: BoutiquePreview,
+  opts: { preserveExistingAiCategories?: boolean } = {},
+): Promise<Boutique> {
+  // Merge the auto-detected categories with any manual admin overrides (Stage 3)
+  // already stored for this handle, so admin corrections survive re-imports.
+  const autoDetected = preview.categoryScores ?? [];
+  const existing = await prisma.boutique.findUnique({
+    where: { instagramHandle: preview.instagramHandle },
+    select: { manualCategoriesAdded: true, manualCategoriesRemoved: true, aiResult: true },
+  });
+  const overrides = existing
+    ? { added: existing.manualCategoriesAdded, removed: existing.manualCategoriesRemoved }
+    : EMPTY_OVERRIDES;
+  const merged = mergeCategories(autoDetected, overrides);
+  const finalCategoryIds = merged.categories.map((c) => c.id);
+  const primaryCategory = merged.categories[0]?.label ?? null;
+
+  // When a keyword-only Parse re-runs on a boutique that already carries AI
+  // results, keep the richer AI-merged categories until Analyze refreshes them.
+  const keepExistingAi =
+    Boolean(opts.preserveExistingAiCategories) && existing != null && existing.aiResult != null;
+
+  // Fields always refreshed from the freshly parsed profile/posts.
+  const profileData = {
+    avatarUrl: preview.avatarUrl,
+    bio: preview.description,
+    keywordScores: (preview.keywordScores ?? []) as unknown as Prisma.InputJsonValue,
+    enrichment: jsonOrDbNull(preview.enrichment),
+    followersCount: preview.followersCount,
+    externalUrl: preview.externalUrl,
+    posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
+    isVerified: preview.isVerified,
+    isBusinessAccount: preview.isBusinessAccount ?? null,
+    isPrivate: preview.isPrivate ?? null,
+    postsCount: preview.postsCount ?? null,
+    followsCount: preview.followsCount ?? null,
+    businessAddress: jsonOrDbNull(preview.businessAddress),
+    externalUrls: (preview.externalUrls ?? []) as unknown as Prisma.InputJsonValue,
+    relatedProfiles: (preview.relatedProfiles ?? []) as unknown as Prisma.InputJsonValue,
+  };
+
+  // AI-influenced category fields — skipped on update when we must keep existing AI.
+  const categoryData = {
+    category: primaryCategory,
+    productCategories: finalCategoryIds,
+    categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
+    aiResult: jsonOrDbNull(preview.aiResult),
+  };
+
+  return prisma.boutique.upsert({
+    where: { instagramHandle: preview.instagramHandle },
+    update: { ...profileData, ...(keepExistingAi ? {} : categoryData), updatedAt: new Date() },
+    create: {
+      name: preview.name,
+      slug: preview.slug,
+      description: preview.description,
+      city: preview.city,
+      status: "DRAFT",
+      instagramHandle: preview.instagramHandle,
+      instagramUrl: preview.instagramUrl,
+      // A create never has existing AI to preserve.
+      ...categoryData,
+      ...profileData,
+    },
+  });
+}
+
+/**
+ * Stage 2 (single-shot interactive path) — persist. Turns a reviewed preview
+ * into a Boutique. Used by the admin's one-URL import flow; the bulk queue uses
+ * the two-stage runParse/runAnalyze below.
  */
 export async function runPersist(jobId: string): Promise<{ job: ImportJob; boutiqueId: string }> {
   const job = await prisma.importJob.findUniqueOrThrow({ where: { id: jobId } });
@@ -193,77 +275,7 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
     throw new ImportStateError("Import job has no preview to save.");
   }
 
-  // Re-detection produced the auto categories (Stages 1–2). Merge them with any
-  // manual admin overrides (Stage 3) already stored for this handle, so admin
-  // corrections survive re-imports. New boutiques have no overrides yet.
-  const autoDetected = preview.categoryScores ?? [];
-  const existing = await prisma.boutique.findUnique({
-    where: { instagramHandle: preview.instagramHandle },
-    select: { manualCategoriesAdded: true, manualCategoriesRemoved: true },
-  });
-  const overrides = existing
-    ? { added: existing.manualCategoriesAdded, removed: existing.manualCategoriesRemoved }
-    : EMPTY_OVERRIDES;
-  const merged = mergeCategories(autoDetected, overrides);
-  const finalCategoryIds = merged.categories.map((c) => c.id);
-  const primaryCategory = merged.categories[0]?.label ?? null;
-
-  const boutique = await prisma.boutique.upsert({
-    where: { instagramHandle: preview.instagramHandle },
-    // Re-import refreshes ONLY the imported/enrichment fields. Manually-owned
-    // fields (name, city, status, description) and manual category overrides are
-    // never overwritten.
-    update: {
-      avatarUrl: preview.avatarUrl,
-      bio: preview.description,
-      category: primaryCategory,
-      productCategories: finalCategoryIds,
-      categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
-      keywordScores: (preview.keywordScores ?? []) as unknown as Prisma.InputJsonValue,
-      aiResult: jsonOrDbNull(preview.aiResult),
-      enrichment: jsonOrDbNull(preview.enrichment),
-      followersCount: preview.followersCount,
-      externalUrl: preview.externalUrl,
-      posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
-      isVerified: preview.isVerified,
-      isBusinessAccount: preview.isBusinessAccount ?? null,
-      isPrivate: preview.isPrivate ?? null,
-      postsCount: preview.postsCount ?? null,
-      followsCount: preview.followsCount ?? null,
-      businessAddress: jsonOrDbNull(preview.businessAddress),
-      externalUrls: (preview.externalUrls ?? []) as unknown as Prisma.InputJsonValue,
-      relatedProfiles: (preview.relatedProfiles ?? []) as unknown as Prisma.InputJsonValue,
-      updatedAt: new Date(),
-    },
-    create: {
-      name: preview.name,
-      slug: preview.slug,
-      description: preview.description,
-      city: preview.city,
-      status: "DRAFT",
-      instagramHandle: preview.instagramHandle,
-      instagramUrl: preview.instagramUrl,
-      avatarUrl: preview.avatarUrl,
-      bio: preview.description,
-      category: primaryCategory,
-      productCategories: finalCategoryIds,
-      categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
-      keywordScores: (preview.keywordScores ?? []) as unknown as Prisma.InputJsonValue,
-      aiResult: jsonOrDbNull(preview.aiResult),
-      enrichment: jsonOrDbNull(preview.enrichment),
-      followersCount: preview.followersCount,
-      externalUrl: preview.externalUrl,
-      posts: (preview.recentPosts ?? []) as unknown as Prisma.InputJsonValue,
-      isVerified: preview.isVerified,
-      isBusinessAccount: preview.isBusinessAccount ?? null,
-      isPrivate: preview.isPrivate ?? null,
-      postsCount: preview.postsCount ?? null,
-      followsCount: preview.followsCount ?? null,
-      businessAddress: jsonOrDbNull(preview.businessAddress),
-      externalUrls: (preview.externalUrls ?? []) as unknown as Prisma.InputJsonValue,
-      relatedProfiles: (preview.relatedProfiles ?? []) as unknown as Prisma.InputJsonValue,
-    },
-  });
+  const boutique = await upsertBoutiqueFromPreview(preview);
 
   const updated = await prisma.importJob.update({
     where: { id: jobId },
@@ -271,4 +283,142 @@ export async function runPersist(jobId: string): Promise<{ job: ImportJob; bouti
   });
 
   return { job: updated, boutiqueId: boutique.id };
+}
+
+/**
+ * Two-stage queue — PARSE (Stage 1). Fetches the Instagram profile + recent
+ * posts through the provider (Apify), runs KEYWORD-ONLY detection (no Gemini),
+ * and persists everything: the raw payload + preview on the ImportJob and the
+ * Boutique itself (idempotent by handle). Lands the ImportJob in
+ * READY_FOR_REVIEW. Target runtime 20–40s. Apify failure → ImportJob FAILED
+ * (rethrown so the queue records PARSE_FAILED); nothing here calls the AI.
+ */
+export async function runParse(jobId: string): Promise<{ job: ImportJob; boutiqueId: string }> {
+  await prisma.importJob.update({
+    where: { id: jobId },
+    data: { status: "PROCESSING", attempts: { increment: 1 } },
+  });
+
+  const job = await prisma.importJob.findUniqueOrThrow({ where: { id: jobId } });
+
+  try {
+    const startedAt = Date.now();
+    const provider = getInstagramProvider();
+    const profile = await provider.fetchProfile({
+      url: job.sourceUrl,
+      handle: job.handle ?? "",
+    });
+    const enrichment = enrichBoutique({
+      biography: profile.biography,
+      externalUrl: profile.externalUrl,
+      externalUrls: profile.externalUrls,
+      businessAddress: profile.businessAddress,
+    });
+    // Keyword engine ONLY — the AI provider is disabled in the Parse stage.
+    const detection = await runHybridDetection(toDetectionInput(profile), {
+      aiProvider: disabledAiCategoryProvider,
+      enrichment,
+    });
+    const preview = mapProfileToPreview(profile, detection, enrichment, false);
+
+    const boutique = await upsertBoutiqueFromPreview(preview, {
+      preserveExistingAiCategories: true,
+    });
+
+    const updated = await prisma.importJob.update({
+      where: { id: jobId },
+      data: {
+        status: "READY_FOR_REVIEW",
+        rawProfile: profile as unknown as Prisma.InputJsonValue,
+        preview: preview as unknown as Prisma.InputJsonValue,
+        boutiqueId: boutique.id,
+        error: null,
+      },
+    });
+
+    logger.info("import.parse_metrics", {
+      handle: job.handle,
+      totalMs: Date.now() - startedAt,
+      postsCount: preview.recentPosts.length,
+      status: "PENDING_ANALYSIS",
+    });
+
+    return { job: updated, boutiqueId: boutique.id };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Parse failed";
+    await prisma.importJob.update({
+      where: { id: jobId },
+      data: { status: "FAILED", error: message },
+    });
+    throw error;
+  }
+}
+
+/**
+ * Two-stage queue — ANALYZE (Stage 2). Loads the ALREADY-PARSED profile from the
+ * ImportJob's stored raw payload (NO Apify call), runs Gemini category analysis
+ * in strict mode, and writes the AI results + AI-merged categories onto the
+ * Boutique. Lands the ImportJob in COMPLETED. Target runtime 5–20s. A Gemini
+ * outage throws (strict mode) so the queue records ANALYSIS_FAILED and can retry
+ * WITHOUT re-scraping; the Parse-stage Boutique stays intact because the upsert
+ * only runs after a successful analysis.
+ */
+export async function runAnalyze(jobId: string): Promise<{ job: ImportJob; boutiqueId: string }> {
+  const job = await prisma.importJob.findUniqueOrThrow({ where: { id: jobId } });
+
+  const rawProfile = job.rawProfile as unknown as RawInstagramProfile | null;
+  if (!rawProfile) {
+    throw new ImportStateError("Import job has not been parsed yet (no raw profile to analyze).");
+  }
+
+  try {
+    const startedAt = Date.now();
+    const enrichment = enrichBoutique({
+      biography: rawProfile.biography,
+      externalUrl: rawProfile.externalUrl,
+      externalUrls: rawProfile.externalUrls,
+      businessAddress: rawProfile.businessAddress,
+    });
+    // Real AI provider in STRICT mode: a terminal Gemini failure throws so the
+    // queue marks ANALYSIS_FAILED instead of silently degrading to keyword-only.
+    const aiProvider = resolveAiCategoryProvider({ throwOnFailure: true });
+    const detection = await runHybridDetection(toDetectionInput(rawProfile), {
+      aiProvider,
+      enrichment,
+    });
+    const preview = mapProfileToPreview(
+      rawProfile,
+      detection,
+      enrichment,
+      aiProvider.name !== "disabled",
+    );
+
+    const boutique = await upsertBoutiqueFromPreview(preview);
+
+    const updated = await prisma.importJob.update({
+      where: { id: jobId },
+      data: {
+        status: "COMPLETED",
+        preview: preview as unknown as Prisma.InputJsonValue,
+        boutiqueId: boutique.id,
+        error: null,
+      },
+    });
+
+    logger.info("import.analyze_metrics", {
+      handle: job.handle,
+      totalMs: Date.now() - startedAt,
+      aiProvider: aiProvider.name,
+      status: "READY_FOR_REVIEW",
+    });
+
+    return { job: updated, boutiqueId: boutique.id };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Analysis failed";
+    await prisma.importJob.update({
+      where: { id: jobId },
+      data: { status: "FAILED", error: message },
+    });
+    throw error;
+  }
 }

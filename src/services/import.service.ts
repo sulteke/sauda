@@ -2,7 +2,13 @@ import "server-only";
 
 import { prisma } from "@/lib/prisma";
 import { ImportValidationError } from "@/server/import/errors";
-import { runDiscovery, runPersist, toImportJobDTO } from "@/server/import/import-pipeline";
+import {
+  runAnalyze,
+  runDiscovery,
+  runParse,
+  runPersist,
+  toImportJobDTO,
+} from "@/server/import/import-pipeline";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
 import type { ImportJobDTO } from "@/types";
 
@@ -41,6 +47,48 @@ export async function saveBoutiqueFromImport(
   jobId: string,
 ): Promise<{ job: ImportJobDTO; boutiqueId: string }> {
   const { job, boutiqueId } = await runPersist(jobId);
+  return { job: toImportJobDTO(job), boutiqueId };
+}
+
+/**
+ * Two-stage queue — Stage 1. Creates an ImportJob for the URL and runs the
+ * Parse stage (Apify fetch + keyword-only persist; NO Gemini). Returns the
+ * ImportJob so the caller can link it to the queue row for Stage 2.
+ */
+export async function parseInstagramProfile(input: {
+  url: string;
+  userId?: string | null;
+}): Promise<{ job: ImportJobDTO; boutiqueId: string }> {
+  const handle = parseInstagramHandle(input.url);
+  if (!handle) {
+    throw new ImportValidationError(
+      "Enter a valid Instagram profile URL (e.g. https://instagram.com/almaty.store).",
+    );
+  }
+
+  const created = await prisma.importJob.create({
+    data: {
+      source: "INSTAGRAM",
+      sourceUrl: input.url.trim(),
+      handle,
+      status: "PENDING",
+      createdBy: input.userId ?? null,
+    },
+  });
+
+  const { job, boutiqueId } = await runParse(created.id);
+  return { job: toImportJobDTO(job), boutiqueId };
+}
+
+/**
+ * Two-stage queue — Stage 2. Runs the Analyze stage against an already-parsed
+ * ImportJob (reloads the stored profile, runs Gemini, persists AI results). NO
+ * Apify call happens here.
+ */
+export async function analyzeImportJob(
+  jobId: string,
+): Promise<{ job: ImportJobDTO; boutiqueId: string }> {
+  const { job, boutiqueId } = await runAnalyze(jobId);
   return { job: toImportJobDTO(job), boutiqueId };
 }
 

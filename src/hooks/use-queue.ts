@@ -65,6 +65,15 @@ export function useDeleteQueueItem() {
   });
 }
 
+export function useRetryQueueItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      request<ImportQueueItemDTO>(`/api/queue/${id}/retry`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
+  });
+}
+
 export type ClearQueueScope = "COMPLETED" | "FAILED" | "ALL";
 
 export function useClearQueue() {
