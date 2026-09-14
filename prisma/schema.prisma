@@ -122,7 +122,11 @@ model Boutique {
   /// approval never changes it and it never changes approval.
   telegramStatus TelegramPublishStatus @default(PENDING) @map("telegram_status")
   /// Failure reason from the last Telegram publish attempt (null on success).
+  /// Stores the COMPLETE, untruncated Telegram API message for debugging.
   telegramError  String?        @map("telegram_error")
+  /// Structured detail of the last publish failure (target, HTTP status, full
+  /// API response, timestamp) for the UI's "View details". Null on success.
+  telegramFailure Json?         @map("telegram_failure")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 

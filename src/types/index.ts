@@ -2,6 +2,7 @@ export type {
   BoutiqueDTO,
   BoutiquePost,
   BoutiqueStatus,
+  TelegramFailureDetail,
   TelegramPublishStatus,
 } from "./boutique";
 export type {

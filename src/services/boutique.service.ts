@@ -11,6 +11,7 @@ import {
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
+  parseTelegramFailure,
 } from "@/lib/boutique-json";
 import { resolveProductCategories } from "@/lib/category-engine";
 import { applyCorrection, mergeCategories } from "@/lib/category-pipeline";
@@ -45,6 +46,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     instagramUrl: row.instagramUrl,
     telegramStatus: row.telegramStatus,
     telegramError: row.telegramError,
+    telegramFailure: parseTelegramFailure(row.telegramFailure),
     posts: parsePosts(row.posts),
     isVerified: row.isVerified,
     isBusinessAccount: row.isBusinessAccount,

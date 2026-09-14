@@ -3,7 +3,7 @@ import "server-only";
 import { ALMATY, canonicalKzCity } from "@/lib/location";
 import { formatNumber } from "@/utils/format";
 
-import type { PublicationTarget, PublishableBoutique } from "./publication-target";
+import { PublicationError, type PublicationTarget, type PublishableBoutique } from "./publication-target";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -104,9 +104,23 @@ export class TelegramChannelTarget implements PublicationTarget {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
-      if (!res.ok || !json.ok) {
-        throw new Error(json.description ?? `Telegram API error (HTTP ${res.status})`);
+
+      // Read the complete response body ONCE, so we can surface the full Telegram
+      // API error (error_code, description, parameters) — never a truncated bit.
+      const rawBody = await res.text().catch(() => "");
+      let parsed: { ok?: boolean; description?: string } = {};
+      try {
+        parsed = rawBody ? (JSON.parse(rawBody) as { ok?: boolean; description?: string }) : {};
+      } catch {
+        parsed = {};
+      }
+
+      if (!res.ok || !parsed.ok) {
+        const detail = parsed.description ?? rawBody;
+        throw new PublicationError(
+          `Telegram ${method} failed (HTTP ${res.status})${detail ? `: ${detail}` : ""}`,
+          { httpStatus: res.status, response: rawBody || null },
+        );
       }
     } catch (error) {
       if (
@@ -114,7 +128,10 @@ export class TelegramChannelTarget implements PublicationTarget {
         error !== null &&
         (error as { name?: unknown }).name === "AbortError"
       ) {
-        throw new Error(`Telegram request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+        throw new PublicationError(`Telegram request timed out after ${REQUEST_TIMEOUT_MS}ms`, {
+          httpStatus: null,
+          response: null,
+        });
       }
       throw error;
     } finally {

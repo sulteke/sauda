@@ -127,13 +127,10 @@ describe("processNextTelegramPost — decoupled from approval", () => {
 
     const result = await processNextTelegramPost();
 
-    expect(update).toHaveBeenCalledWith({
-      where: { id: "b1" },
-      data: { telegramStatus: "SKIPPED", telegramError: null },
-    });
-    // Approval status is never touched by the publisher.
-    const updateData = update.mock.calls[0]?.[0] as { data: Record<string, unknown> };
-    expect(updateData.data).not.toHaveProperty("status");
+    const updateData = (update.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(updateData).toMatchObject({ telegramStatus: "SKIPPED", telegramError: null });
+    // Approval status is never touched by the publisher; no failure detail on skip.
+    expect(updateData).not.toHaveProperty("status");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result.status).toBe("SKIPPED");
     expect(result.processed).toBe(true);
@@ -144,7 +141,8 @@ describe("processNextTelegramPost — decoupled from approval", () => {
     process.env.TELEGRAM_CHANNEL_ID = "@chan";
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true }),
+      status: 200,
+      text: async () => JSON.stringify({ ok: true }),
     } as unknown as Response);
     vi.stubGlobal("fetch", fetchMock);
     findFirst.mockResolvedValue(readyRow({ city: "Алматы", avatarUrl: "https://img/a.jpg" }));
@@ -152,12 +150,41 @@ describe("processNextTelegramPost — decoupled from approval", () => {
     const result = await processNextTelegramPost();
 
     expect(fetchMock).toHaveBeenCalledTimes(1); // actually published
-    expect(update).toHaveBeenCalledWith({
-      where: { id: "b1" },
-      data: { telegramStatus: "PUBLISHED", telegramError: null },
-    });
-    const updateData = update.mock.calls[0]?.[0] as { data: Record<string, unknown> };
-    expect(updateData.data).not.toHaveProperty("status");
+    const updateData = (update.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(updateData).toMatchObject({ telegramStatus: "PUBLISHED", telegramError: null });
+    expect(updateData).not.toHaveProperty("status");
     expect(result.status).toBe("PUBLISHED");
+  });
+
+  it("records the COMPLETE Telegram error + structured detail on failure", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "token";
+    process.env.TELEGRAM_CHANNEL_ID = "@chan";
+    const apiBody = JSON.stringify({
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: chat not found",
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => apiBody,
+    } as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    findFirst.mockResolvedValue(readyRow({ city: "Алматы", avatarUrl: "https://img/a.jpg" }));
+
+    const result = await processNextTelegramPost();
+
+    expect(result.status).toBe("FAILED");
+    const updateData = (update.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(updateData.telegramStatus).toBe("FAILED");
+    // Full, untruncated message is stored (includes the Telegram description).
+    expect(String(updateData.telegramError)).toContain("Bad Request: chat not found");
+    // Structured detail carries the HTTP status, target, complete response, time.
+    const detail = updateData.telegramFailure as Record<string, unknown>;
+    expect(detail.httpStatus).toBe(400);
+    expect(detail.targetId).toBe("telegram:almaty");
+    expect(String(detail.response)).toContain("error_code");
+    expect(typeof detail.failedAt).toBe("string");
+    expect(updateData).not.toHaveProperty("status");
   });
 });

@@ -26,6 +26,22 @@ export type BoutiqueStatus =
 /** Telegram publishing state, independent of the approval `status`. */
 export type TelegramPublishStatus = "PENDING" | "PUBLISHED" | "SKIPPED" | "FAILED";
 
+/** Structured detail of the last publish failure, for the "View details" UI. */
+export interface TelegramFailureDetail {
+  /** The publication target that failed, e.g. "telegram:almaty". */
+  targetId: string;
+  /** Human-readable target/channel label. */
+  targetLabel: string;
+  /** HTTP status code from the API, when available. */
+  httpStatus: number | null;
+  /** Full, untruncated error message. */
+  message: string;
+  /** The complete raw API response body, when available. */
+  response: string | null;
+  /** ISO timestamp of the failure. */
+  failedAt: string;
+}
+
 /**
  * A single Instagram post captured during import (snapshot, not re-scraped).
  * The first five fields are the original shape; the rest are richer metadata
@@ -87,7 +103,10 @@ export interface BoutiqueDTO {
   instagramUrl: string | null;
   /** Telegram publishing state — independent of `status`. */
   telegramStatus: TelegramPublishStatus;
+  /** Full, untruncated last-failure message (null on success). */
   telegramError: string | null;
+  /** Structured detail of the last publish failure (null on success). */
+  telegramFailure: TelegramFailureDetail | null;
   posts: BoutiquePost[];
   // Richer Instagram metadata captured at import time (nullable / defaulted so
   // rows imported before this milestone still serialize cleanly).

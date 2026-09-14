@@ -1,4 +1,4 @@
-import type { PublicationTarget, PublishableBoutique } from "./publication-target";
+import { PublicationError, type PublicationTarget, type PublishableBoutique } from "./publication-target";
 
 /** Result of attempting one target for one boutique. */
 export type PublicationStatus = "PUBLISHED" | "SKIPPED" | "FAILED";
@@ -8,7 +8,12 @@ export interface PublicationOutcome {
   targetId: string;
   label: string;
   status: PublicationStatus;
+  /** Full, untruncated failure message (null unless FAILED). */
   error: string | null;
+  /** HTTP status from the target's API, when it threw a PublicationError. */
+  httpStatus?: number | null;
+  /** Complete raw API response body, when available. */
+  response?: string | null;
 }
 
 /**
@@ -43,7 +48,18 @@ export async function publishToTargets(
       outcomes.push({ targetId: target.id, label: target.label, status: "PUBLISHED", error: null });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Publish failed";
-      outcomes.push({ targetId: target.id, label: target.label, status: "FAILED", error: message });
+      const outcome: PublicationOutcome = {
+        targetId: target.id,
+        label: target.label,
+        status: "FAILED",
+        error: message,
+      };
+      // Attach rich diagnostics when the target reported them.
+      if (error instanceof PublicationError) {
+        outcome.httpStatus = error.httpStatus;
+        outcome.response = error.response;
+      }
+      outcomes.push(outcome);
     }
   }
 

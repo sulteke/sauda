@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DiscoveryCandidate } from "@prisma/client";
 
+import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import {
   DEFAULT_TARGET_NEW_ACCOUNTS,
@@ -75,11 +76,26 @@ export async function runDiscovery(input: string): Promise<DiscoveryRunResult> {
   }
 
   const provider = getDiscoveryProvider();
+  // TEMP DIAGNOSTIC: shows which provider ran and the seed — if this logs
+  // provider "mock", discovery never hits Apify/pagination at all.
+  logger.info("discovery.run", {
+    provider: provider.name,
+    seedType: seed.type,
+    seedValue: seed.value,
+    targetNew: DEFAULT_TARGET_NEW_ACCOUNTS,
+  });
   // Paginate until we collect enough genuinely-new accounts (or run out of
   // results), skipping any handle already imported or previously discovered.
   const accounts = await provider.discover(seed, {
     isKnownHandles: findKnownHandles,
     targetNewCount: DEFAULT_TARGET_NEW_ACCOUNTS,
+  });
+
+  // TEMP DIAGNOSTIC: how many NEW accounts the provider returned for this run.
+  logger.info("discovery.run.result", {
+    provider: provider.name,
+    seedValue: seed.value,
+    returnedAccounts: accounts.length,
   });
 
   const created =

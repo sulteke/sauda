@@ -9,6 +9,7 @@ import type {
   InstagramBusinessAddress,
   InstagramExternalLink,
   InstagramRelatedProfile,
+  TelegramFailureDetail,
 } from "@/types";
 
 /**
@@ -58,4 +59,21 @@ export function parseEnrichment(value: Prisma.JsonValue | null | undefined): Bou
 export function parseAiResult(value: Prisma.JsonValue | null | undefined): AiCategoryResult | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
   return parseAiCategoryResult(value);
+}
+
+/** Parses the stored structured Telegram failure detail; null when absent/malformed. */
+export function parseTelegramFailure(
+  value: Prisma.JsonValue | null | undefined,
+): TelegramFailureDetail | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.message !== "string") return null;
+  return {
+    targetId: typeof v.targetId === "string" ? v.targetId : "",
+    targetLabel: typeof v.targetLabel === "string" ? v.targetLabel : "",
+    httpStatus: typeof v.httpStatus === "number" ? v.httpStatus : null,
+    message: v.message,
+    response: typeof v.response === "string" ? v.response : null,
+    failedAt: typeof v.failedAt === "string" ? v.failedAt : "",
+  };
 }

@@ -28,6 +28,27 @@ export interface PublishableBoutique {
   posts: BoutiquePost[];
 }
 
+/**
+ * Error a target throws when a publish attempt fails. Carries the FULL,
+ * untruncated message plus the HTTP status and complete raw API response so the
+ * engine can record rich diagnostics. Targets that don't have HTTP semantics can
+ * throw a plain Error — the engine degrades gracefully (null status/response).
+ */
+export class PublicationError extends Error {
+  readonly httpStatus: number | null;
+  readonly response: string | null;
+
+  constructor(
+    message: string,
+    options: { httpStatus?: number | null; response?: string | null; cause?: unknown } = {},
+  ) {
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "PublicationError";
+    this.httpStatus = options.httpStatus ?? null;
+    this.response = options.response ?? null;
+  }
+}
+
 /** A single publication destination. */
 export interface PublicationTarget {
   /** Stable identifier, e.g. "telegram:almaty". */

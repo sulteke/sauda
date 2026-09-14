@@ -162,6 +162,17 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
       resultsLimit: this.resultsLimit,
     });
 
+    // TEMP DIAGNOSTIC: proves the paginating code path is the one running, and
+    // whether a DB dedup checker was actually injected.
+    logger.info("discovery.hashtag.start", {
+      tag,
+      totalPosts: posts.length,
+      resultsLimit: this.resultsLimit,
+      pageSize,
+      targetNew,
+      hasKnownChecker: Boolean(options.isKnownHandles),
+    });
+
     const collected: DiscoveredAccount[] = [];
     const seen = new Set<string>(); // dedupe across the whole run
     let pagesChecked = 0;
@@ -195,15 +206,42 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
           ? await options.isKnownHandles(pageAccounts.map((account) => account.handle))
           : new Set<string>();
 
+      let knownThisPage = 0;
+      let newThisPage = 0;
       for (const account of pageAccounts) {
         accountsSeen += 1;
         if (known.has(account.handle)) {
           existingAccounts += 1;
+          knownThisPage += 1;
           continue;
         }
         collected.push(account);
+        newThisPage += 1;
         if (collected.length >= targetNew) break;
       }
+
+      // TEMP DIAGNOSTIC: per-page Fetched / Already known / New counts.
+      logger.info("discovery.page", {
+        tag,
+        page: pagesChecked,
+        fetched: pageAccounts.length,
+        alreadyKnown: knownThisPage,
+        new: newThisPage,
+        collected: collected.length,
+        target: targetNew,
+      });
+    }
+
+    // TEMP DIAGNOSTIC: if NO page yielded a usable account, the owner field is
+    // probably not `ownerUsername`. Dump ONE raw Apify item (keys + item) so we
+    // can see which field actually carries the Instagram handle. First item only.
+    if (accountsSeen === 0 && posts.length > 0) {
+      const firstItem = posts[0] as unknown as Record<string, unknown>;
+      logger.info("discovery.raw_item", {
+        tag,
+        keys: Object.keys(firstItem ?? {}),
+        item: firstItem,
+      });
     }
 
     const stoppedReason = collected.length >= targetNew ? "target_reached" : "dataset_exhausted";

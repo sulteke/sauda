@@ -10,6 +10,7 @@ import {
   parseExternalLinks,
   parsePosts,
   parseRelatedProfiles,
+  parseTelegramFailure,
 } from "@/lib/boutique-json";
 import { categoryLabel, resolveProductCategories } from "@/lib/category-engine";
 import { prisma } from "@/lib/prisma";
@@ -51,6 +52,7 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     instagramUrl: row.instagramUrl,
     telegramStatus: row.telegramStatus,
     telegramError: row.telegramError,
+    telegramFailure: parseTelegramFailure(row.telegramFailure),
     posts: parsePosts(row.posts),
     isVerified: row.isVerified,
     isBusinessAccount: row.isBusinessAccount,

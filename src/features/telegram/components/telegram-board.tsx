@@ -1,22 +1,23 @@
+import type { ReactNode } from "react";
 import { CheckCircle2, Clock, SkipForward, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FailedBoutiqueCard } from "@/features/telegram/components/failed-boutique-card";
 import type { BoutiqueDTO } from "@/types";
 
-function Column({
+/** Shared card shell with a title, an icon, and a count badge. */
+function ColumnShell({
   title,
   icon: Icon,
-  items,
-  showError = false,
-  showCity = false,
+  count,
+  children,
 }: {
   title: string;
   icon: LucideIcon;
-  items: BoutiqueDTO[];
-  showError?: boolean;
-  showCity?: boolean;
+  count: number;
+  children: ReactNode;
 }) {
   return (
     <Card>
@@ -25,39 +26,64 @@ function Column({
           <Icon className="h-4 w-4 text-muted-foreground" />
           {title}
         </CardTitle>
-        <span className="text-sm font-semibold tabular-nums text-muted-foreground">
-          {items.length}
-        </span>
+        <span className="text-sm font-semibold tabular-nums text-muted-foreground">{count}</span>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">None.</p>
-        ) : (
-          items.map((boutique) => (
-            <div key={boutique.id} className="flex items-start gap-2 rounded-md border p-2">
-              <Avatar className="h-8 w-8">
-                {boutique.avatarUrl ? (
-                  <AvatarImage src={boutique.avatarUrl} alt={boutique.name} />
-                ) : null}
-                <AvatarFallback>{boutique.name.charAt(0).toUpperCase()}</AvatarFallback>
-              </Avatar>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{boutique.name}</div>
-                {showError && boutique.telegramError ? (
-                  <div className="truncate text-xs text-destructive">{boutique.telegramError}</div>
-                ) : showCity ? (
-                  <div className="truncate text-xs text-muted-foreground">
-                    📍 {boutique.city ?? "Unknown"}
-                  </div>
-                ) : boutique.category ? (
-                  <div className="truncate text-xs text-muted-foreground">{boutique.category}</div>
-                ) : null}
-              </div>
-            </div>
-          ))
-        )}
-      </CardContent>
+      <CardContent className="space-y-2">{children}</CardContent>
     </Card>
+  );
+}
+
+function Column({
+  title,
+  icon,
+  items,
+  showCity = false,
+}: {
+  title: string;
+  icon: LucideIcon;
+  items: BoutiqueDTO[];
+  showCity?: boolean;
+}) {
+  return (
+    <ColumnShell title={title} icon={icon} count={items.length}>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">None.</p>
+      ) : (
+        items.map((boutique) => (
+          <div key={boutique.id} className="flex items-start gap-2 rounded-md border p-2">
+            <Avatar className="h-8 w-8">
+              {boutique.avatarUrl ? (
+                <AvatarImage src={boutique.avatarUrl} alt={boutique.name} />
+              ) : null}
+              <AvatarFallback>{boutique.name.charAt(0).toUpperCase()}</AvatarFallback>
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium">{boutique.name}</div>
+              {showCity ? (
+                <div className="truncate text-xs text-muted-foreground">
+                  📍 {boutique.city ?? "Unknown"}
+                </div>
+              ) : boutique.category ? (
+                <div className="truncate text-xs text-muted-foreground">{boutique.category}</div>
+              ) : null}
+            </div>
+          </div>
+        ))
+      )}
+    </ColumnShell>
+  );
+}
+
+/** Failed column — compact cards with a "View details" modal per boutique. */
+function FailedColumn({ items }: { items: BoutiqueDTO[] }) {
+  return (
+    <ColumnShell title="Failed" icon={XCircle} count={items.length}>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">None.</p>
+      ) : (
+        items.map((boutique) => <FailedBoutiqueCard key={boutique.id} boutique={boutique} />)
+      )}
+    </ColumnShell>
   );
 }
 
@@ -77,7 +103,7 @@ export function TelegramBoard({
       <Column title="Pending publications" icon={Clock} items={pending} />
       <Column title="Published" icon={CheckCircle2} items={published} />
       <Column title="Skipped (not Almaty)" icon={SkipForward} items={skipped} showCity />
-      <Column title="Failed" icon={XCircle} items={failed} showError />
+      <FailedColumn items={failed} />
     </div>
   );
 }

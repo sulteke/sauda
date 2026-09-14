@@ -1,5 +1,7 @@
 import "server-only";
 
+import { Prisma } from "@prisma/client";
+
 import { categoryLabel } from "@/lib/category-engine";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -44,22 +46,43 @@ async function countPendingPublish(): Promise<number> {
 /** Collapses per-target outcomes into the single status we persist today. */
 function reduceOutcomes(outcomes: PublicationOutcome[]): {
   status: PublicationStatus;
-  error: string | null;
+  failure: PublicationOutcome | null;
 } {
-  const failed = outcomes.find((outcome) => outcome.status === "FAILED");
-  if (failed) return { status: "FAILED", error: failed.error };
+  const failure = outcomes.find((outcome) => outcome.status === "FAILED") ?? null;
+  if (failure) return { status: "FAILED", failure };
   const published = outcomes.some((outcome) => outcome.status === "PUBLISHED");
-  return { status: published ? "PUBLISHED" : "SKIPPED", error: null };
+  return { status: published ? "PUBLISHED" : "SKIPPED", failure: null };
 }
 
-/** Persists the reduced outcome onto the boutique (never touches approval `status`). */
+/**
+ * Persists the reduced outcome onto the boutique (never touches approval
+ * `status`). On failure it stores the COMPLETE message in `telegramError` plus
+ * the structured detail (target, HTTP status, full response, timestamp) in
+ * `telegramFailure` for the UI; on success/skip it clears both.
+ */
 async function recordOutcome(
   boutiqueId: string,
-  reduced: { status: PublicationStatus; error: string | null },
+  reduced: { status: PublicationStatus; failure: PublicationOutcome | null },
 ): Promise<void> {
+  const failure = reduced.failure;
+  const detail: Prisma.InputJsonValue | typeof Prisma.DbNull = failure
+    ? {
+        targetId: failure.targetId,
+        targetLabel: failure.label,
+        httpStatus: failure.httpStatus ?? null,
+        message: failure.error ?? "",
+        response: failure.response ?? null,
+        failedAt: new Date().toISOString(),
+      }
+    : Prisma.DbNull;
+
   await prisma.boutique.update({
     where: { id: boutiqueId },
-    data: { telegramStatus: reduced.status, telegramError: reduced.error },
+    data: {
+      telegramStatus: reduced.status,
+      telegramError: failure?.error ?? null,
+      telegramFailure: detail,
+    },
   });
 }
 
@@ -112,11 +135,15 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
   // Target-driven: the engine runs every registered target and reports outcomes.
   const outcomes = await publishToTargets(boutique, getTelegramTargets());
   for (const outcome of outcomes) {
+    // Log the COMPLETE diagnostics (full message + HTTP status + raw response),
+    // never a shortened line, so failures are debuggable from the logs alone.
     logger.info("publication.outcome", {
       boutiqueId: next.id,
       target: outcome.targetId,
       status: outcome.status,
       ...(outcome.error ? { error: outcome.error } : {}),
+      ...(outcome.httpStatus != null ? { httpStatus: outcome.httpStatus } : {}),
+      ...(outcome.response ? { response: outcome.response } : {}),
     });
   }
 
@@ -127,7 +154,7 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
     processed: true,
     boutiqueId: next.id,
     status: reduced.status,
-    error: reduced.error,
+    error: reduced.failure?.error ?? null,
     remaining: await countPendingPublish(),
   };
 }
