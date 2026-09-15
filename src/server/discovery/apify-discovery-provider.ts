@@ -18,14 +18,18 @@ import {
 
 const DEFAULT_BASE_URL = "https://api.apify.com";
 const DEFAULT_PROFILE_ACTOR = "apify~instagram-profile-scraper";
-const DEFAULT_HASHTAG_ACTOR = "apify~instagram-hashtag-scraper";
+// General Instagram Scraper. For hashtags it takes a `directUrls` explore/tags
+// URL and returns posts (each with `ownerUsername`) — a deeper, better-maintained
+// source than the dedicated hashtag actor. Overridable via
+// APIFY_DISCOVERY_HASHTAG_ACTOR.
+const DEFAULT_HASHTAG_ACTOR = "apify~instagram-scraper";
 const DEFAULT_TIMEOUT_MS = 90_000; // discovery scrapes can be slow
 // Upper bound on hashtag posts pulled in one run, overridable via
 // APIFY_DISCOVERY_RESULTS_LIMIT. The sync dataset endpoint returns the whole set
-// at once, so we fetch a generous cap and then walk it in pages — this gives the
-// paginator room to find enough NEW accounts even when many posts belong to
-// already-imported owners. Bounded for cost / rate limits.
-const DEFAULT_RESULTS_LIMIT = 300;
+// at once, so we fetch this many posts and then walk them, collecting unique NEW
+// owners. Kept CONSERVATIVE so a synchronous run stays safely under the Vercel
+// Hobby 60s serverless limit — raise it only if your runtime allows longer runs.
+const DEFAULT_RESULTS_LIMIT = 200;
 const MAX_ATTEMPTS = 2; // initial try + one retry
 const RETRY_DELAY_MS = 1_500; // gentle backoff between retries
 
@@ -156,8 +160,11 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
     const targetNew = options.targetNewCount ?? DEFAULT_TARGET_NEW_ACCOUNTS;
     const pageSize = options.pageSize ?? DEFAULT_DISCOVERY_PAGE_SIZE;
 
+    // apify~instagram-scraper reads a hashtag from its explore/tags URL. Encode
+    // the tag so non-ASCII hashtags (e.g. Cyrillic) produce a valid URL. This is
+    // generic — no per-hashtag logic.
     const posts = await this.runActor<ApifyHashtagPost>(this.hashtagActorId, {
-      hashtags: [tag],
+      directUrls: [`https://www.instagram.com/explore/tags/${encodeURIComponent(tag)}/`],
       resultsType: "posts",
       resultsLimit: this.resultsLimit,
     });

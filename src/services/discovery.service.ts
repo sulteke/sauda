@@ -42,6 +42,16 @@ async function findKnownHandles(handles: string[]): Promise<Set<string>> {
   return known;
 }
 
+/**
+ * How many NEW unique accounts one discovery run aims to collect. Configurable
+ * via APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS (default 50); a non-positive/invalid
+ * value falls back to the default.
+ */
+function resolveTargetNewAccounts(): number {
+  const env = Number(process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS);
+  return Number.isFinite(env) && env > 0 ? env : DEFAULT_TARGET_NEW_ACCOUNTS;
+}
+
 function toDTO(row: DiscoveryCandidate): DiscoveryCandidateDTO {
   return {
     id: row.id,
@@ -76,19 +86,20 @@ export async function runDiscovery(input: string): Promise<DiscoveryRunResult> {
   }
 
   const provider = getDiscoveryProvider();
+  const targetNewCount = resolveTargetNewAccounts();
   // TEMP DIAGNOSTIC: shows which provider ran and the seed — if this logs
   // provider "mock", discovery never hits Apify/pagination at all.
   logger.info("discovery.run", {
     provider: provider.name,
     seedType: seed.type,
     seedValue: seed.value,
-    targetNew: DEFAULT_TARGET_NEW_ACCOUNTS,
+    targetNew: targetNewCount,
   });
-  // Paginate until we collect enough genuinely-new accounts (or run out of
-  // results), skipping any handle already imported or previously discovered.
+  // Collect genuinely-new accounts (skipping any handle already imported or
+  // previously discovered) until we reach the target or the dataset is exhausted.
   const accounts = await provider.discover(seed, {
     isKnownHandles: findKnownHandles,
-    targetNewCount: DEFAULT_TARGET_NEW_ACCOUNTS,
+    targetNewCount,
   });
 
   // TEMP DIAGNOSTIC: how many NEW accounts the provider returned for this run.

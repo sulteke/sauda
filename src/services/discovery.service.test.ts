@@ -26,17 +26,24 @@ vi.mock("@/server/discovery/discovery-provider", async (importOriginal) => {
 import { runDiscovery } from "./discovery.service";
 
 describe("runDiscovery — new-account filtering", () => {
+  const originalTarget = process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS;
+
   beforeEach(() => {
     boutiqueFindMany.mockReset();
     candidateFindMany.mockReset();
     candidateCreateMany.mockReset();
     getDiscoveryProvider.mockReset();
+    delete process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS;
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalTarget === undefined) delete process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS;
+    else process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS = originalTarget;
+  });
 
-  it("passes a DB-backed isKnownHandles that unions boutiques + candidates, and a target of 10", async () => {
+  it("passes a DB-backed isKnownHandles that unions boutiques + candidates, and a target of 50", async () => {
     // "imported_boutique" is an existing boutique; "old_candidate" is an existing candidate.
     boutiqueFindMany.mockResolvedValue([{ instagramHandle: "imported_boutique" }]);
     candidateFindMany.mockResolvedValue([{ handle: "old_candidate" }]);
@@ -66,7 +73,7 @@ describe("runDiscovery — new-account filtering", () => {
 
     const result = await runDiscovery("#almatyshop");
 
-    expect(capturedOptions?.targetNewCount).toBe(10);
+    expect(capturedOptions?.targetNewCount).toBe(50);
     // The checker queried BOTH tables with the batch of handles.
     expect(boutiqueFindMany).toHaveBeenCalledWith({
       where: { instagramHandle: { in: ["imported_boutique", "old_candidate", "brand_new"] } },
@@ -81,5 +88,24 @@ describe("runDiscovery — new-account filtering", () => {
       expect.objectContaining({ skipDuplicates: true }),
     );
     expect(result).toMatchObject({ seedType: "HASHTAG", seedValue: "almatyshop", found: 1, added: 1 });
+  });
+
+  it("honors APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS for the target", async () => {
+    process.env.APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS = "25";
+    boutiqueFindMany.mockResolvedValue([]);
+    candidateFindMany.mockResolvedValue([]);
+    candidateCreateMany.mockResolvedValue({ count: 0 });
+
+    let capturedOptions: DiscoverOptions | undefined;
+    getDiscoveryProvider.mockReturnValue({
+      name: "fake",
+      async discover(_seed: DiscoverySeed, options: DiscoverOptions = {}) {
+        capturedOptions = options;
+        return [];
+      },
+    });
+
+    await runDiscovery("#almatyshop");
+    expect(capturedOptions?.targetNewCount).toBe(25);
   });
 });

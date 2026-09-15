@@ -20,8 +20,9 @@ export interface DiscoveredAccount {
   followersCount: number | null;
 }
 
-/** How many genuinely-new accounts a hashtag discovery run aims to collect. */
-export const DEFAULT_TARGET_NEW_ACCOUNTS = 10;
+/** How many genuinely-new accounts a hashtag discovery run aims to collect.
+ *  Overridable via APIFY_DISCOVERY_TARGET_NEW_ACCOUNTS. */
+export const DEFAULT_TARGET_NEW_ACCOUNTS = 50;
 /** Page size used when walking hashtag results and filtering against the DB. */
 export const DEFAULT_DISCOVERY_PAGE_SIZE = 10;
 
