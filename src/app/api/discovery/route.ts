@@ -11,6 +11,8 @@ import {
 import { listCandidates, runDiscovery } from "@/services/discovery.service";
 
 export const dynamic = "force-dynamic";
+// Hashtag scrapes are slow; use the full Vercel budget (Hobby caps at 60s).
+export const maxDuration = 60;
 
 const runSchema = z.object({ seed: z.string().min(1) });
 

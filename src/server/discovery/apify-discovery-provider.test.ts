@@ -70,25 +70,27 @@ describe("ApifyDiscoveryProvider — hashtag discovery", () => {
       { isKnownHandles: knownHandles() },
     );
 
+    // Union input: `hashtags` (for hashtag actors) AND a directUrls explore/tags
+    // URL (for the general scraper) — actor-agnostic, so no per-actor branching.
     const body = requestBody(fetchMock);
+    expect(body.hashtags).toEqual(["алматыодежда"]);
     expect(body.directUrls).toEqual([
       `https://www.instagram.com/explore/tags/${encodeURIComponent("алматыодежда")}/`,
     ]);
     // The encoded URL is valid ASCII (percent-encoded), never raw Cyrillic bytes.
     expect(String((body.directUrls as string[])[0])).toMatch(/%[0-9A-F]{2}/);
     expect(body.resultsType).toBe("posts");
-    expect(body).not.toHaveProperty("hashtags");
     // owner handle is normalized to lowercase.
     expect(result[0]?.handle).toBe("almaty_boutique");
   });
 
-  it("targets the general instagram-scraper actor by default, configurable via env", async () => {
+  it("defaults to the high-volume hashtag actor, configurable via env", async () => {
     fetchMock.mockResolvedValue(okResponse([]));
 
     // Default actor.
     await provider().discover({ type: "HASHTAG", value: "t" }, { isKnownHandles: knownHandles() });
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items",
+      "/v2/acts/dami_studio~instagram-hashtag-scraper/run-sync-get-dataset-items",
     );
 
     // Env override (read at construction time).
@@ -190,11 +192,11 @@ describe("ApifyDiscoveryProvider — hashtag discovery", () => {
     expect(paginationMetric()).toMatchObject({ newAccounts: 2, stoppedReason: "dataset_exhausted" });
   });
 
-  it("defaults the fetch cap to 200 and honors APIFY_DISCOVERY_RESULTS_LIMIT", async () => {
+  it("defaults the fetch cap to 80 and honors APIFY_DISCOVERY_RESULTS_LIMIT", async () => {
     fetchMock.mockResolvedValue(okResponse([]));
 
     await provider().discover({ type: "HASHTAG", value: "t" }, { isKnownHandles: knownHandles() });
-    expect(requestBody(fetchMock, 0).resultsLimit).toBe(200);
+    expect(requestBody(fetchMock, 0).resultsLimit).toBe(80);
 
     process.env.APIFY_DISCOVERY_RESULTS_LIMIT = "42";
     await new ApifyDiscoveryProvider({ token: "t", baseUrl: "https://apify.test" }).discover(

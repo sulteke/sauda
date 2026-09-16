@@ -18,18 +18,21 @@ import {
 
 const DEFAULT_BASE_URL = "https://api.apify.com";
 const DEFAULT_PROFILE_ACTOR = "apify~instagram-profile-scraper";
-// General Instagram Scraper. For hashtags it takes a `directUrls` explore/tags
-// URL and returns posts (each with `ownerUsername`) — a deeper, better-maintained
-// source than the dedicated hashtag actor. Overridable via
-// APIFY_DISCOVERY_HASHTAG_ACTOR.
-const DEFAULT_HASHTAG_ACTOR = "apify~instagram-scraper";
-const DEFAULT_TIMEOUT_MS = 90_000; // discovery scrapes can be slow
-// Upper bound on hashtag posts pulled in one run, overridable via
-// APIFY_DISCOVERY_RESULTS_LIMIT. The sync dataset endpoint returns the whole set
-// at once, so we fetch this many posts and then walk them, collecting unique NEW
-// owners. Kept CONSERVATIVE so a synchronous run stays safely under the Vercel
-// Hobby 60s serverless limit — raise it only if your runtime allows longer runs.
-const DEFAULT_RESULTS_LIMIT = 200;
+// Hashtag actor. The official Instagram actors only return the anonymous
+// first-page sample (~6 posts) for a hashtag; this actor scrapes through a
+// no-login data-provider lane and actually returns the requested volume (each
+// post carries `ownerUsername`). Overridable via APIFY_DISCOVERY_HASHTAG_ACTOR.
+const DEFAULT_HASHTAG_ACTOR = "dami_studio~instagram-hashtag-scraper";
+// Below the Vercel Hobby 60s function limit so a slow run aborts cleanly on our
+// side rather than being killed by the platform. Overridable via
+// APIFY_DISCOVERY_TIMEOUT_MS.
+const DEFAULT_TIMEOUT_MS = 55_000;
+// Posts pulled per synchronous run, overridable via APIFY_DISCOVERY_RESULTS_LIMIT.
+// The sync dataset endpoint returns the whole set at once, so this is bounded by
+// the Vercel Hobby 60s limit: measured ~0.45s/post for the default actor, so 80
+// posts ≈ 40s (≈50 unique owners) leaves comfortable headroom. Raising it fetches
+// more owners but risks the 60s cutoff (≈150 posts ≈ 68s already exceeds it).
+const DEFAULT_RESULTS_LIMIT = 80;
 const MAX_ATTEMPTS = 2; // initial try + one retry
 const RETRY_DELAY_MS = 1_500; // gentle backoff between retries
 
@@ -160,10 +163,13 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
     const targetNew = options.targetNewCount ?? DEFAULT_TARGET_NEW_ACCOUNTS;
     const pageSize = options.pageSize ?? DEFAULT_DISCOVERY_PAGE_SIZE;
 
-    // apify~instagram-scraper reads a hashtag from its explore/tags URL. Encode
-    // the tag so non-ASCII hashtags (e.g. Cyrillic) produce a valid URL. This is
-    // generic — no per-hashtag logic.
+    // Union input so the actor stays swappable via APIFY_DISCOVERY_HASHTAG_ACTOR
+    // with NO per-actor (and NO per-hashtag) branching: the `hashtags` array feeds
+    // hashtag actors (e.g. dami_studio), while `directUrls`/`resultsType` feed the
+    // general instagram-scraper — each actor reads the fields it knows and ignores
+    // the rest. `encodeURIComponent` keeps non-ASCII tags (e.g. Cyrillic) valid.
     const posts = await this.runActor<ApifyHashtagPost>(this.hashtagActorId, {
+      hashtags: [tag],
       directUrls: [`https://www.instagram.com/explore/tags/${encodeURIComponent(tag)}/`],
       resultsType: "posts",
       resultsLimit: this.resultsLimit,
