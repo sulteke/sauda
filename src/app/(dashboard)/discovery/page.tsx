@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { AutoImportPanel } from "@/features/discovery/components/auto-import-panel";
 import { CandidateTable } from "@/features/discovery/components/candidate-table";
 import { DiscoveryForm } from "@/features/discovery/components/discovery-form";
 
@@ -26,6 +27,19 @@ export default function DiscoveryPage() {
         </CardHeader>
         <CardContent>
           <DiscoveryForm />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Import candidates</CardTitle>
+          <CardDescription>
+            Send discovered accounts to the import queue in controlled batches of{" "}
+            {/* keep Apify usage bounded */}10 — one click imports them all, batch by batch.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AutoImportPanel />
         </CardContent>
       </Card>
 
