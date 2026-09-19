@@ -168,12 +168,19 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
     // hashtag actors (e.g. dami_studio), while `directUrls`/`resultsType` feed the
     // general instagram-scraper — each actor reads the fields it knows and ignores
     // the rest. `encodeURIComponent` keeps non-ASCII tags (e.g. Cyrillic) valid.
-    const posts = await this.runActor<ApifyHashtagPost>(this.hashtagActorId, {
-      hashtags: [tag],
-      directUrls: [`https://www.instagram.com/explore/tags/${encodeURIComponent(tag)}/`],
-      resultsType: "posts",
-      resultsLimit: this.resultsLimit,
-    });
+    // Single attempt (no retry): a hashtag scrape is slow, so a retry could stack
+    // two ~55s attempts and overrun the function. One attempt keeps the actor call
+    // bounded by the ~55s per-attempt timeout.
+    const posts = await this.runActor<ApifyHashtagPost>(
+      this.hashtagActorId,
+      {
+        hashtags: [tag],
+        directUrls: [`https://www.instagram.com/explore/tags/${encodeURIComponent(tag)}/`],
+        resultsType: "posts",
+        resultsLimit: this.resultsLimit,
+      },
+      1,
+    );
 
     // TEMP DIAGNOSTIC: proves the paginating code path is the one running, and
     // whether a DB dedup checker was actually injected.
@@ -329,10 +336,22 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
     return `${this.baseUrl}/v2/acts/${actorId}/run-sync-get-dataset-items`;
   }
 
-  private async runActor<T>(actorId: string, input: Record<string, unknown>): Promise<T[]> {
+  /**
+   * Runs an actor with a bounded number of attempts. `maxAttempts` defaults to
+   * MAX_ATTEMPTS (used by the quick profile call), but the hashtag path passes 1:
+   * a single slow attempt must not be able to start a second ~55s attempt and
+   * stack toward the function limit. With one attempt the actor call is bounded
+   * by the per-attempt AbortController (APIFY_DISCOVERY_TIMEOUT_MS ≈ 55s), so a
+   * slow run aborts cleanly with a 502 error instead of overrunning the request.
+   */
+  private async runActor<T>(
+    actorId: string,
+    input: Record<string, unknown>,
+    maxAttempts: number = MAX_ATTEMPTS,
+  ): Promise<T[]> {
     let lastError: unknown;
 
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         return await this.callApify<T>(actorId, input, attempt);
       } catch (error) {
@@ -340,16 +359,17 @@ export class ApifyDiscoveryProvider implements DiscoveryProvider {
         logger.warn("discovery.apify.attempt_failed", {
           actorId,
           attempt,
-          maxAttempts: MAX_ATTEMPTS,
+          maxAttempts,
           error: errorMessage(error),
         });
-        if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS); // backoff
+        if (attempt < maxAttempts) await sleep(RETRY_DELAY_MS); // backoff
       }
     }
 
-    throw new DiscoveryProviderError(`Apify discovery failed after ${MAX_ATTEMPTS} attempts.`, {
-      cause: lastError,
-    });
+    throw new DiscoveryProviderError(
+      `Apify discovery failed after ${maxAttempts} attempt${maxAttempts === 1 ? "" : "s"}.`,
+      { cause: lastError },
+    );
   }
 
   private async callApify<T>(

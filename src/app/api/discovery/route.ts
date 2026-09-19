@@ -11,8 +11,10 @@ import {
 import { listCandidates, runDiscovery } from "@/services/discovery.service";
 
 export const dynamic = "force-dynamic";
-// Hashtag scrapes are slow; use the full Vercel budget (Hobby caps at 60s).
-export const maxDuration = 60;
+// Hashtag scrapes are slow. Vercel Fluid Compute (Hobby) allows up to 300s, and
+// the hashtag provider is bounded to a single ~55s actor attempt, so this only
+// removes the artificial 60s ceiling — the request still finishes in ~40–65s.
+export const maxDuration = 300;
 
 const runSchema = z.object({ seed: z.string().min(1) });
 
