@@ -11,6 +11,13 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -34,9 +41,13 @@ async function setStatus(id: string, status: BoutiqueStatus): Promise<void> {
   }
 }
 
+const ALL_CITIES = "ALL";
+const UNKNOWN_CITY = "UNKNOWN";
+
 export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
   const router = useRouter();
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [cityFilter, setCityFilter] = useState<string>(ALL_CITIES);
 
   async function act(id: string, status: BoutiqueStatus, message: string) {
     setPendingId(id);
@@ -51,6 +62,7 @@ export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
     }
   }
 
+  // Whole queue empty — no filter to show.
   if (items.length === 0) {
     return (
       <EmptyState
@@ -61,8 +73,55 @@ export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
     );
   }
 
+  // City options derived from the existing Boutique.city field in the current data.
+  const cities = Array.from(
+    new Set(items.map((b) => b.city).filter((c): c is string => Boolean(c && c.trim()))),
+  ).sort((a, b) => a.localeCompare(b));
+  const hasUnknown = items.some((b) => !b.city || !b.city.trim());
+
+  const filtered = items.filter((b) => {
+    if (cityFilter === ALL_CITIES) return true;
+    if (cityFilter === UNKNOWN_CITY) return !b.city || !b.city.trim();
+    return b.city === cityFilter;
+  });
+
+  const filterBar = (
+    <div className="flex items-center gap-2">
+      <span className="text-sm text-muted-foreground">City</span>
+      <Select value={cityFilter} onValueChange={setCityFilter}>
+        <SelectTrigger className="w-52">
+          <SelectValue placeholder="All Cities" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ALL_CITIES}>All Cities</SelectItem>
+          {cities.map((city) => (
+            <SelectItem key={city} value={city}>
+              {city}
+            </SelectItem>
+          ))}
+          {hasUnknown ? <SelectItem value={UNKNOWN_CITY}>Unknown</SelectItem> : null}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
+  if (filtered.length === 0) {
+    return (
+      <div className="space-y-4">
+        {filterBar}
+        <EmptyState
+          icon={ClipboardCheck}
+          title="No boutiques in this city"
+          description="Choose “All Cities” to see the full review queue."
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-lg border">
+    <div className="space-y-4">
+      {filterBar}
+      <div className="rounded-lg border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -77,7 +136,7 @@ export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {items.map((boutique) => (
+          {filtered.map((boutique) => (
             <TableRow key={boutique.id}>
               <TableCell>
                 <Avatar className="h-9 w-9">
@@ -128,6 +187,7 @@ export function ReviewQueueTable({ items }: { items: BoutiqueDTO[] }) {
           ))}
         </TableBody>
       </Table>
+      </div>
     </div>
   );
 }
