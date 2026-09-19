@@ -8,6 +8,14 @@ import { Button } from "@/components/ui/button";
 import { useProcessNext, useQueue } from "@/hooks/use-queue";
 import type { ImportQueueStatus } from "@/types";
 
+/**
+ * Pause between sequential process-next calls so the per-item Gemini analysis
+ * calls don't hit the API in a tight burst and trip its rate limit (429). This
+ * only paces the EXISTING sequential loop — it is not a long-running request.
+ */
+const PROCESS_DELAY_MS = 4000;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // Terminal outcomes of one queue item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
 const FAILED_STATUSES: ImportQueueStatus[] = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"];
@@ -60,6 +68,8 @@ export function ProcessQueueButton() {
         setProgress({ done, total });
 
         keepGoing = result.processed && result.remaining > 0;
+        // Space out calls so Gemini analyses don't burst into a 429.
+        if (keepGoing) await sleep(PROCESS_DELAY_MS);
       }
 
       const processed = succeeded + failed;

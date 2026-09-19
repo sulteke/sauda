@@ -27,8 +27,44 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_DELAY_MS = 600;
 /** Transient statuses worth retrying — notably 503 "high demand" from Flash. */
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+/**
+ * Hard wall-clock budget for a whole analyze() call (all attempts + all backoff
+ * waits). It bounds the total so the enclosing process-next request stays safely
+ * under Vercel's 60s function limit: with ~40s here, ≥20s remains for queue/DB
+ * overhead and cold start. Enforced by (a) capping each attempt's fetch timeout
+ * to the time left, and (b) never sleeping past the deadline.
+ */
+const ANALYZE_BUDGET_MS = 40_000;
+/**
+ * Cap on the CUMULATIVE 429 backoff wait within one analyze() call (a subset of
+ * ANALYZE_BUDGET_MS). Kept small so a rate-limit spike is retried briefly, not
+ * for the whole budget; sustained 429 fails fast → retryable ANALYSIS_FAILED.
+ */
+const RETRY_429_BUDGET_MS = 10_000;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Extracts Google's advised retry delay (RetryInfo.retryDelay, e.g. "27s" or
+ * "1.5s") from a 429 error body, in milliseconds. Returns null when absent or
+ * unparsable, so the caller can fall back to exponential backoff.
+ */
+function parseRetryDelayMs(body: string): number | null {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: unknown } })?.error?.details;
+    if (!Array.isArray(details)) return null;
+    for (const detail of details) {
+      const value = (detail as { retryDelay?: unknown })?.retryDelay;
+      if (typeof value === "string") {
+        const seconds = /^([0-9]+(?:\.[0-9]+)?)s$/.exec(value.trim())?.[1];
+        if (seconds) return Math.round(Number.parseFloat(seconds) * 1000);
+      }
+    }
+  } catch {
+    // Non-JSON body — fall back to exponential backoff.
+  }
+  return null;
+}
 
 export interface GeminiProviderOptions {
   model?: string;
@@ -105,10 +141,19 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 
   async analyze(request: AiCategoryRequest): Promise<AiCategoryResult> {
     const prompt = buildAiCategoryPrompt(request);
+    // Hard deadline for the whole call, plus a small cumulative 429 wait budget.
+    const deadline = Date.now() + ANALYZE_BUDGET_MS;
+    let backoff429BudgetMs = RETRY_429_BUDGET_MS;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      // Stop if there isn't enough time left for a useful attempt.
+      const budgetLeft = deadline - Date.now();
+      if (budgetLeft <= 1_000) break;
+
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      // Cap this attempt to the smaller of the per-request timeout and time left,
+      // so no attempt can push the call past the deadline.
+      const timeout = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, budgetLeft));
       const startedAt = Date.now();
 
       try {
@@ -147,16 +192,43 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
         // Logged at WARN (console.warn) — visible in Vercel logs (unlike console.log).
         const body = await response.text().catch(() => "");
         if (RETRYABLE_STATUS.has(response.status) && attempt < this.maxAttempts) {
-          logger.warn("gemini.retrying", {
-            provider: this.name,
-            model: this.model,
-            status: response.status,
-            attempt,
-            maxAttempts: this.maxAttempts,
-            durationMs,
-          });
-          await delay(this.retryDelayMs * attempt);
-          continue;
+          let canRetry = true;
+          let waitMs: number;
+          if (response.status === 429) {
+            // Rate limited: honor Google's retryDelay hint, else exponential
+            // 1s → 2s → 4s, capped by the remaining cumulative 429 budget. When
+            // the budget is spent, stop retrying so the request can't approach
+            // the function limit — the item becomes retryable ANALYSIS_FAILED.
+            const deadlineLeft = Math.max(0, deadline - Date.now());
+            if (backoff429BudgetMs <= 0 || deadlineLeft <= 1_000) {
+              canRetry = false;
+              waitMs = 0;
+            } else {
+              const hintedMs = parseRetryDelayMs(body);
+              const exponentialMs = 1_000 * 2 ** (attempt - 1);
+              // Cap by the 429 budget AND the overall deadline.
+              waitMs = Math.min(hintedMs ?? exponentialMs, backoff429BudgetMs, deadlineLeft);
+              backoff429BudgetMs -= waitMs;
+            }
+          } else {
+            waitMs = this.retryDelayMs * attempt; // unchanged for 408 / 5xx
+          }
+
+          if (canRetry) {
+            logger.warn("gemini.retrying", {
+              provider: this.name,
+              model: this.model,
+              status: response.status,
+              attempt,
+              maxAttempts: this.maxAttempts,
+              waitMs,
+              durationMs,
+            });
+            if (waitMs > 0) await delay(waitMs);
+            continue;
+          }
+          // 429 backoff budget exhausted — fall through to fail; the queue marks
+          // ANALYSIS_FAILED (parsed data preserved, retryable later, no re-scrape).
         }
         logger.warn("gemini.request_failed", {
           provider: this.name,
@@ -178,7 +250,8 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 
         const durationMs = Date.now() - startedAt;
         const message = error instanceof Error ? error.message : String(error);
-        if (attempt < this.maxAttempts) {
+        const deadlineLeft = Math.max(0, deadline - Date.now());
+        if (attempt < this.maxAttempts && deadlineLeft > 1_000) {
           logger.warn("gemini.retrying", {
             provider: this.name,
             model: this.model,
@@ -187,7 +260,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
             maxAttempts: this.maxAttempts,
             durationMs,
           });
-          await delay(this.retryDelayMs * attempt);
+          await delay(Math.min(this.retryDelayMs * attempt, deadlineLeft));
           continue;
         }
         logger.warn("gemini.request_error", {

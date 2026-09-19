@@ -156,6 +156,45 @@ describe("GeminiCategoryProvider", () => {
     expect(result.categories).toEqual([]);
   });
 
+  it("retries a 429 honoring Google's retryDelay hint, then succeeds", async () => {
+    const retryBody =
+      '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0s"}]}}';
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(429, retryBody))
+      .mockResolvedValueOnce(geminiResponse('{"categories":[{"id":"hudi","confidence":90}]}'));
+
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+    }).analyze(request());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.categories).toEqual([{ id: "hudi", confidence: 90, reason: "" }]);
+  });
+
+  it("gives up after maxAttempts of persistent 429", async () => {
+    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"details":[{"retryDelay":"0s"}]}}'));
+
+    const result = await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 3,
+    }).analyze(request());
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.categories).toEqual([]);
+  });
+
+  it("throws in strict mode after a persistent 429 (→ retryable ANALYSIS_FAILED)", async () => {
+    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"details":[{"retryDelay":"0s"}]}}'));
+
+    await expect(
+      new GeminiCategoryProvider("k", {
+        baseUrl: "https://gemini.test",
+        maxAttempts: 2,
+        throwOnFailure: true,
+      }).analyze(request()),
+    ).rejects.toBeInstanceOf(AiCategoryProviderError);
+  });
+
   it("never throws: retries then returns an empty result on a network error", async () => {
     fetchMock.mockRejectedValue(new Error("network down"));
 
