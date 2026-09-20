@@ -11,6 +11,7 @@ import {
   mergeCategories,
   runHybridDetection,
 } from "@/lib/category-pipeline";
+import { completeHashtags } from "@/lib/hashtag-derivation";
 import { resolveLocation } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -59,6 +60,20 @@ export function mapProfileToPreview(
 ): BoutiquePreview {
   const productCategories = detection.autoDetected.map(({ id, label }) => ({ id, label }));
 
+  // Hashtags to publish: the AI's whitelist picks, topped up deterministically
+  // from the detected categories and the profile's own text when it returned
+  // fewer than the 2–5 target. The top-up costs no model quota, so a thin reply
+  // never leaves a post without hashtags — and `aiResult` below still records
+  // exactly what the model answered.
+  const hashtags = completeHashtags(detection.ai.hashtags, {
+    categoryIds: productCategories.map((c) => c.id),
+    text: [
+      profile.biography,
+      profile.fullName,
+      ...profile.recentPosts.flatMap((post) => [post.caption, ...(post.hashtags ?? [])]),
+    ],
+  });
+
   return {
     name: profile.fullName?.trim() || profile.handle,
     slug: slugify(profile.handle),
@@ -75,6 +90,7 @@ export function mapProfileToPreview(
     keywordScores: detection.keyword,
     // Persist the AI result only when a real provider ran; null means "no AI".
     aiResult: aiRan ? detection.ai : undefined,
+    hashtags,
     enrichment,
     city: null,
     recentPosts: profile.recentPosts.slice(0, MAX_RECENT_POSTS),
@@ -248,6 +264,10 @@ async function upsertBoutiqueFromPreview(
     productCategories: finalCategoryIds,
     categoryScores: autoDetected as unknown as Prisma.InputJsonValue,
     aiResult: jsonOrDbNull(preview.aiResult),
+    // Refreshed alongside the categories they were derived from. A keyword-only
+    // re-parse skips this block entirely, so a richer AI-backed hashtag set is
+    // never downgraded until Analyze refreshes it.
+    hashtags: preview.hashtags ?? [],
   };
 
   // Location is derived from data we already have (enrichment city, AI city). It

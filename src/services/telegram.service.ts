@@ -6,6 +6,7 @@ import { dailyTelegramPublishLimit } from "@/config/limits";
 import { sanitizeHashtags } from "@/config/telegram-hashtags";
 import { startOfBusinessDay } from "@/lib/business-day";
 import { categoryLabel } from "@/lib/category-engine";
+import { completeHashtags } from "@/lib/hashtag-derivation";
 import { ALMATY, canonicalKzCity } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -120,6 +121,8 @@ function toPublishable(boutique: {
   city: string | null;
   telegramOverrideCity: string | null;
   productCategories: string[];
+  hashtags: string[];
+  description: string | null;
   aiResult: unknown;
   followersCount: number | null;
   bio: string | null;
@@ -134,12 +137,21 @@ function toPublishable(boutique: {
   const categories = boutique.productCategories
     .map((id) => categoryLabel(id))
     .filter((label): label is string => label !== null);
-  // Re-validated against the whitelist on the way out: stored AI results predate
-  // the whitelist, and a stale or hand-edited row must not reach the channel.
+
+  // Published set first; fall back to what the AI recorded. Both are re-validated
+  // against the whitelist on the way out — a stale or hand-edited row must never
+  // reach the channel. Anything still missing is derived deterministically from
+  // the categories and text this boutique already has, so a boutique analyzed
+  // before hashtags existed still publishes with them and costs no model quota.
   const aiHashtags =
     boutique.aiResult && typeof boutique.aiResult === "object"
       ? (boutique.aiResult as { hashtags?: unknown }).hashtags
       : undefined;
+  const stored = sanitizeHashtags(boutique.hashtags);
+  const hashtags = completeHashtags(stored.length > 0 ? stored : aiHashtags, {
+    categoryIds: boutique.productCategories,
+    text: [boutique.bio, boutique.description, boutique.name, ...posts.map((p) => p.caption)],
+  });
 
   return {
     id: boutique.id,
@@ -147,7 +159,7 @@ function toPublishable(boutique: {
     city: boutique.city,
     overrideCity: boutique.telegramOverrideCity,
     categories,
-    hashtags: sanitizeHashtags(aiHashtags),
+    hashtags,
     followersCount: boutique.followersCount,
     bio: boutique.bio,
     instagramUrl: boutique.instagramUrl,

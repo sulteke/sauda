@@ -91,6 +91,11 @@ export interface BoutiqueDTO {
   keywordScores: DetectedCategory[];
   /** Raw AI provider result (null when no AI ran). */
   aiResult: AiCategoryResult | null;
+  /**
+   * Whitelisted Telegram hashtags published for this boutique (2–5). Separate
+   * from the category fields: hashtags describe how the boutique is advertised.
+   */
+  hashtags: string[];
   /** Categories an admin added by hand (Stage 3). */
   manualCategoriesAdded: ProductCategory[];
   /** Categories an admin removed by hand (Stage 3). */

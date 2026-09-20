@@ -125,6 +125,8 @@ function readyRow(over: Record<string, unknown> = {}) {
     city: "Алматы",
     telegramOverrideCity: null,
     aiResult: null,
+    hashtags: [],
+    description: null,
     posts: [],
     productCategories: [],
     followersCount: null,
@@ -255,6 +257,75 @@ describe("processNextTelegramPost — decoupled from approval", () => {
     expect(String(detail.response)).toContain("error_code");
     expect(typeof detail.failedAt).toBe("string");
     expect(updateData).not.toHaveProperty("status");
+  });
+});
+
+describe("hashtags reaching the Telegram caption", () => {
+  const env = { ...process.env };
+
+  beforeEach(() => {
+    findFirst.mockReset();
+    findUnique.mockReset();
+    update.mockReset();
+    count.mockReset();
+    count.mockResolvedValue(0);
+    update.mockResolvedValue(readyRow());
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    process.env = { ...env };
+  });
+
+  /** Publishes one boutique and returns the caption Telegram received. */
+  async function captionFor(over: Record<string, unknown>): Promise<string> {
+    const fetchMock = stubTelegramOk();
+    findFirst.mockResolvedValue(readyRow({ avatarUrl: "https://img/a.jpg", ...over }));
+    await processNextTelegramPost();
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    return String(body.caption ?? body.media?.[0]?.caption ?? "");
+  }
+
+  it("publishes the boutique's stored hashtags", async () => {
+    const caption = await captionFor({ hashtags: ["#Женскаяодежда", "#Платья", "#Классика"] });
+    expect(caption).toContain("🏷 Категориялар\n#Женскаяодежда #Платья #Классика");
+  });
+
+  it("drops a stale non-whitelist tag that somehow reached the column", async () => {
+    const caption = await captionFor({ hashtags: ["#Худи", "#ВыдуманныйТег"] });
+    expect(caption).toContain("#Худи");
+    expect(caption).not.toContain("#ВыдуманныйТег");
+  });
+
+  it("derives hashtags for an OLD boutique that has none, without any model call", async () => {
+    const caption = await captionFor({
+      hashtags: [],
+      aiResult: null,
+      productCategories: ["zhakety"],
+      bio: "Женская одежда, деловой стиль",
+    });
+    expect(caption).toContain("#Жакеты");
+    expect(caption).toContain("#Женскаяодежда");
+  });
+
+  it("falls back to what the AI recorded when the column is still empty", async () => {
+    const caption = await captionFor({
+      hashtags: [],
+      aiResult: { hashtags: ["#Кроссовки", "#Обувь"] },
+      productCategories: [],
+    });
+    expect(caption).toContain("#Кроссовки");
+    expect(caption).toContain("#Обувь");
+  });
+
+  it("never renders more than five", async () => {
+    const caption = await captionFor({
+      hashtags: ["#Худи", "#Футболки", "#Джинсы", "#Обувь", "#Кроссовки", "#Кеды", "#Топы"],
+    });
+    const line = caption.split("🏷 Категориялар\n")[1]?.split("\n")[0] ?? "";
+    expect(line.trim().split(" ")).toHaveLength(5);
   });
 });
 

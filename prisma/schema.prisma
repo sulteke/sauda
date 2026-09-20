@@ -89,6 +89,13 @@ model Boutique {
   /// Raw AI provider result (categories + confidence + reasons, city, mall, address,
   /// targetAudience, priceSegment, style, summary). Null when no AI ran.
   aiResult      Json?           @map("ai_result")
+  /// Whitelisted Telegram hashtags actually published for this boutique (2–5).
+  /// Separate from `aiResult.hashtags`, which records only what the model said:
+  /// this column is the published set, so a deterministic top-up or a backfill
+  /// can fill it without ever rewriting the AI's own record. Independent of the
+  /// category fields — hashtags describe how a boutique is advertised, not how
+  /// it is classified.
+  hashtags      String[]        @default([])
   /// Category ids an admin added by hand (Stage 3).
   manualCategoriesAdded String[] @default([]) @map("manual_categories_added")
   /// Category ids an admin removed by hand (Stage 3).

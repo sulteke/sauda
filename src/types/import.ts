@@ -34,6 +34,12 @@ export interface BoutiquePreview {
   keywordScores?: DetectedCategory[];
   /** Raw AI provider result (absent on legacy previews / when no AI ran). */
   aiResult?: AiCategoryResult;
+  /**
+   * Whitelisted Telegram hashtags to publish (2–5): the AI's picks, topped up
+   * deterministically from categories + text when it returned too few. Separate
+   * from `aiResult.hashtags`, which stays exactly as the model answered.
+   */
+  hashtags?: string[];
   /** Structured business info derived from the imported data (absent on legacy previews). */
   enrichment?: BoutiqueEnrichment;
   city: string | null;

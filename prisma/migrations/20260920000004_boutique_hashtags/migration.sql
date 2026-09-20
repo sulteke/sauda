@@ -1,0 +1,11 @@
+-- Published Telegram hashtags for a boutique (2-5, whitelist-only).
+--
+-- Kept in its own column rather than inside ai_result, because the published
+-- set and the model's own answer are different facts: a deterministic top-up or
+-- a backfill may add tags the model never returned, and rewriting ai_result
+-- would corrupt the record of what the AI actually said.
+--
+-- Additive with an empty default, so every existing row stays valid and keeps
+-- its current behaviour (an empty set falls back to category-derived tags at
+-- publish time) until the backfill fills it in.
+ALTER TABLE "boutiques" ADD COLUMN "hashtags" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

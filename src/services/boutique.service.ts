@@ -37,6 +37,7 @@ function toDTO(row: Boutique, lastImportedAt: string | null = null): BoutiqueDTO
     categoryScores: parseCategoryScores(row.categoryScores),
     keywordScores: parseCategoryScores(row.keywordScores),
     aiResult: parseAiResult(row.aiResult),
+    hashtags: row.hashtags,
     manualCategoriesAdded: resolveProductCategories(row.manualCategoriesAdded),
     manualCategoriesRemoved: resolveProductCategories(row.manualCategoriesRemoved),
     enrichment: parseEnrichment(row.enrichment),
