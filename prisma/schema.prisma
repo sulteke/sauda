@@ -127,6 +127,14 @@ model Boutique {
   /// Structured detail of the last publish failure (target, HTTP status, full
   /// API response, timestamp) for the UI's "View details". Null on success.
   telegramFailure Json?         @map("telegram_failure")
+  /// Admin-set city used ONLY for Telegram publication eligibility, when the
+  /// detected `city` is Unknown and a human confirms the boutique is relevant
+  /// to the channel's city. NEVER overwrites the AI-detected `city`.
+  telegramOverrideCity String?  @map("telegram_override_city")
+  /// When the boutique was successfully posted to Telegram. This is the ONLY
+  /// source of truth for the per-business-day publication limit, so skipped,
+  /// failed, pending and approved-but-unpublished boutiques never count.
+  telegramPublishedAt DateTime? @map("telegram_published_at")
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 
@@ -135,6 +143,7 @@ model Boutique {
   @@index([status])
   @@index([telegramQueued])
   @@index([telegramStatus])
+  @@index([telegramPublishedAt])
   @@map("boutiques")
 }
 
@@ -155,6 +164,11 @@ model ImportJob {
   /// Failure reason when status = FAILED.
   error      String?
   attempts   Int          @default(0)
+  /// When an AI (Gemini) call was actually issued for this job. Stamped at the
+  /// moment of invocation — BEFORE the response is known — so a failed request
+  /// still counts, because it still consumed the provider's daily quota. This
+  /// is the ONLY source of truth for the per-business-day analysis limit.
+  analyzedAt DateTime?    @map("analyzed_at")
   /// Supabase user id of the admin who ran the import.
   createdBy  String?      @map("created_by")
 
@@ -167,6 +181,7 @@ model ImportJob {
   @@index([status])
   @@index([handle])
   @@index([boutiqueId])
+  @@index([analyzedAt])
   @@map("import_jobs")
 }
 
@@ -182,6 +197,11 @@ model ImportJob {
 /// ANALYSIS_FAILED re-runs only Gemini (the parsed data is reused, so Apify is
 /// NEVER repeated once Parse has succeeded).
 ///
+/// Before Analyze spends an AI call, a quality gate runs on the parsed profile.
+/// Accounts below the follower threshold (or with no follower count at all)
+/// land in SKIPPED_LOW_FOLLOWERS — a TERMINAL, non-failure state that is never
+/// retried and never consumes AI quota. Their parsed data is preserved.
+///
 /// The legacy PENDING/PROCESSING/COMPLETED/FAILED values are retained only so
 /// rows written before the two-stage split stay valid; new rows never use them.
 enum ImportQueueStatus {
@@ -192,6 +212,9 @@ enum ImportQueueStatus {
   READY_FOR_REVIEW
   PARSE_FAILED
   ANALYSIS_FAILED
+  /// Terminal: below the follower quality gate (or follower count unavailable),
+  /// so Gemini was never called. NOT a failure and never retried for analysis.
+  SKIPPED_LOW_FOLLOWERS
   // Legacy (pre two-stage split) — kept for backward compatibility only.
   PENDING
   PROCESSING

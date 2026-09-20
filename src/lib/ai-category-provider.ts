@@ -1,3 +1,8 @@
+import {
+  formatHashtagWhitelist,
+  MAX_TELEGRAM_HASHTAGS,
+  sanitizeHashtags,
+} from "@/config/telegram-hashtags";
 import type { DetectedCategory, ProductCategory } from "@/types/category";
 import type { BoutiqueEnrichment } from "@/types/enrichment";
 import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
@@ -36,6 +41,11 @@ export interface AiCategoryRequest {
   mentions: string[];
   /** The ONLY categories the AI may choose from. */
   allowedCategories: ProductCategory[];
+  /**
+   * The ONLY Telegram hashtags the AI may choose from (canonical strings,
+   * "#" included). Omitted → the AI is not asked for hashtags at all.
+   */
+  allowedHashtags?: readonly string[];
   /** Keyword-engine results, given as strong prior context (validate/extend). */
   keywordResults?: DetectedCategory[];
   /** Structured enrichment already derived from the same data. */
@@ -53,6 +63,12 @@ export interface AiCategorySuggestion {
 /** Strict shape the AI must return (also the parsed/validated result). */
 export interface AiCategoryResult {
   categories: AiCategorySuggestion[];
+  /**
+   * Telegram hashtags chosen from the whitelist — a structured field of its own,
+   * independent of `categories`. Already validated against the whitelist,
+   * deduplicated and capped, so it is safe to render verbatim.
+   */
+  hashtags: string[];
   city: string | null;
   mall: string | null;
   address: string | null;
@@ -64,6 +80,7 @@ export interface AiCategoryResult {
 
 export const EMPTY_AI_RESULT: AiCategoryResult = {
   categories: [],
+  hashtags: [],
   city: null,
   mall: null,
   address: null,
@@ -147,6 +164,29 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
     2,
   );
 
+  // Hashtags are optional: when no whitelist is supplied the model is not asked
+  // for them at all, and the schema stays exactly as it was before.
+  const allowedHashtags = request.allowedHashtags ?? [];
+  const wantsHashtags = allowedHashtags.length > 0;
+  const max = MAX_TELEGRAM_HASHTAGS;
+  const hashtagSchema = wantsHashtags ? ',"hashtags":["#Tag","..."]' : "";
+  const hashtagRules = wantsHashtags
+    ? [
+        'Also select Telegram "hashtags" for this boutique. This is a SEPARATE field from "categories" — it describes how the boutique is advertised, not its internal classification.',
+        "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
+        `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
+        "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
+        'Return an empty "hashtags" array when the content supports none of them.',
+      ]
+    : [];
+  const hashtagSection = wantsHashtags
+    ? [
+        "Allowed hashtags (copy exactly; these are the ONLY permitted values):",
+        formatHashtagWhitelist(allowedHashtags),
+        "",
+      ]
+    : [];
+
   return [
     "You analyze an Instagram clothing/retail business and profile it.",
     "TASK — treat this Instagram account as a PRODUCT CATALOG, not a business classifier. Categories are MULTI-LABEL. Read the profile name, bio, hashtags and ALL post captions TOGETHER as one catalog (not post by post). Return EVERY product category the business sells: if a category is clearly present in even ONE post, include it. Multiple categories are expected — if one post advertises jeans, another shoes, another jackets and another T-shirts, return all four. Do NOT collapse to just the most common category, and do NOT return only the dominant or most frequent categories. Include a category even if it appears in only one post. Omit a category ONLY when there is no evidence for it in ANY of the posts.",
@@ -154,13 +194,15 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
     `Confidence (0-100) is your CERTAINTY that the business sells that category — NOT how frequently it appears. A single clear post is enough to be highly confident. Include a category only when confidence is ${AI_CONFIDENCE_THRESHOLD} or higher; a clearly-present category must be at least ${AI_CONFIDENCE_THRESHOLD} even if it shows up in just one post (use values below ${AI_CONFIDENCE_THRESHOLD} only when you are genuinely unsure whether they sell it). If no category has any evidence at all, return an empty "categories" array.`,
     "Sort the categories array by confidence, highest first.",
     "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — never discard a clearly-correct keyword result, and add any other categories the posts reveal.",
+    ...hashtagRules,
     "Respond with STRICT JSON only. No markdown, no code fences, no commentary, no extra fields. Match EXACTLY this schema:",
-    '{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}],"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."}',
+    `{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}]${hashtagSchema},"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."}`,
     "Use null (not empty string) for city, mall, address, targetAudience, priceSegment, style or summary when unknown.",
     "",
     "Allowed categories:",
     allowed,
     "",
+    ...hashtagSection,
     "Keyword engine results (prior context):",
     keyword,
     "",
@@ -177,7 +219,8 @@ function toStringOrNull(value: unknown): string | null {
  * Safely parses a model reply (JSON string or already-parsed object) into a
  * well-formed `AiCategoryResult`. Never throws — malformed input yields an empty
  * result, malformed category entries are dropped, extra fields are ignored. Does
- * NOT apply the allowed-id / confidence rules (the pipeline enforces those).
+ * NOT apply the allowed-id / confidence rules (the pipeline enforces those);
+ * hashtags ARE whitelist-checked here, since they are published verbatim.
  */
 export function parseAiCategoryResult(raw: unknown): AiCategoryResult {
   let parsed: unknown = raw;
@@ -211,6 +254,10 @@ export function parseAiCategoryResult(raw: unknown): AiCategoryResult {
 
   return {
     categories,
+    // Unlike category ids, hashtags are validated HERE: they are rendered
+    // verbatim into a public channel, so no unvetted string may survive the
+    // parser, whoever the caller is.
+    hashtags: sanitizeHashtags(obj.hashtags),
     city: toStringOrNull(obj.city),
     mall: toStringOrNull(obj.mall),
     address: toStringOrNull(obj.address),

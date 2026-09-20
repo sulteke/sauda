@@ -14,6 +14,7 @@ import {
 import { resolveLocation } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { assertAiInvocationAllowed, reserveAiInvocation } from "@/server/ai/analysis-budget";
 import { resolveAiCategoryProvider } from "@/server/ai/gemini-category-provider";
 import type { BoutiqueEnrichment, BoutiquePreview, ImportJobDTO } from "@/types";
 import { slugify } from "@/utils/format";
@@ -114,8 +115,16 @@ export function toImportJobDTO(job: ImportJob): ImportJobDTO {
  * configured provider, stores the raw payload + normalized preview, and lands in
  * READY_FOR_REVIEW (or FAILED). At scale this stage is what a background worker
  * runs; the status transitions are the contract.
+ *
+ * This is the manual single-import path, and it spends an AI request like any
+ * other, so it is subject to the SAME daily budget. The check runs before the
+ * job is touched or the profile scraped: a refused import must cost no Apify
+ * credit and leave no half-finished row behind.
  */
 export async function runDiscovery(jobId: string): Promise<ImportJob> {
+  const aiProvider = resolveAiCategoryProvider();
+  await assertAiInvocationAllowed(aiProvider.name, { jobId, path: "manual-import" });
+
   await prisma.importJob.update({
     where: { id: jobId },
     data: { status: "PROCESSING", attempts: { increment: 1 } },
@@ -139,7 +148,7 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       externalUrls: profile.externalUrls,
       businessAddress: profile.businessAddress,
     });
-    const aiProvider = resolveAiCategoryProvider();
+    await reserveAiInvocation(jobId, aiProvider.name);
     const detection = await runHybridDetection(detectionInput, { aiProvider, enrichment });
     const preview = mapProfileToPreview(
       profile,
@@ -394,6 +403,7 @@ export async function runAnalyze(jobId: string): Promise<{ job: ImportJob; bouti
     // Real AI provider in STRICT mode: a terminal Gemini failure throws so the
     // queue marks ANALYSIS_FAILED instead of silently degrading to keyword-only.
     const aiProvider = resolveAiCategoryProvider({ throwOnFailure: true });
+    await reserveAiInvocation(jobId, aiProvider.name);
     const detection = await runHybridDetection(toDetectionInput(rawProfile), {
       aiProvider,
       enrichment,

@@ -7,6 +7,8 @@ export type ImportQueueStatus =
   | "READY_FOR_REVIEW"
   | "PARSE_FAILED"
   | "ANALYSIS_FAILED"
+  // Terminal quality outcome: below the follower gate, so no AI call was made.
+  | "SKIPPED_LOW_FOLLOWERS"
   // Legacy (pre two-stage split) — retained for rows written before the split.
   | "PENDING"
   | "PROCESSING"

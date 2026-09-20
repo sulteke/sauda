@@ -46,6 +46,9 @@ export interface ProcessResult {
   processed: boolean;
   item: ImportQueueItemDTO | null;
   remaining: number;
+  /** Today's AI allowance is spent — stop the loop and resume tomorrow. */
+  dailyLimitReached?: boolean;
+  analyzedToday?: number;
 }
 
 export function useProcessNext() {

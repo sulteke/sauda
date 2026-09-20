@@ -46,8 +46,16 @@ export function buildCaption(boutique: PublishableBoutique): string {
   if (boutique.externalUrl) links.push(`🌐 ${escapeHtml(boutique.externalUrl)}`);
   if (links.length > 0) lines.push(`\n${links.join("\n")}`);
 
-  // Categories as hashtags — near the bottom, after the boutique information.
-  const hashtags = boutique.categories.slice(0, MAX_HASHTAGS).map(toHashtag).filter(Boolean);
+  // Hashtags — near the bottom, after the boutique information. Prefer the
+  // whitelisted tags the AI selected; boutiques analyzed before hashtags existed
+  // have none, so they keep the original category-derived rendering.
+  const hashtags = (
+    boutique.hashtags.length > 0
+      ? boutique.hashtags
+      : boutique.categories.slice(0, MAX_HASHTAGS).map(toHashtag)
+  )
+    .filter(Boolean)
+    .slice(0, MAX_HASHTAGS);
   if (hashtags.length > 0) lines.push(`\n🏷 Категориялар\n${hashtags.join(" ")}`);
 
   const caption = lines.join("\n");
@@ -90,8 +98,16 @@ export class TelegramChannelTarget implements PublicationTarget {
     return Boolean(this.token && this.chatId);
   }
 
+  /**
+   * Eligible when the DETECTED city matches, or when an admin explicitly
+   * confirmed this city for a boutique whose location could not be detected.
+   * The override is an eligibility signal only — it never edits the detection.
+   */
   isEligible(boutique: PublishableBoutique): boolean {
-    return canonicalKzCity(boutique.city) === this.eligibleCity;
+    return (
+      canonicalKzCity(boutique.city) === this.eligibleCity ||
+      canonicalKzCity(boutique.overrideCity) === this.eligibleCity
+    );
   }
 
   private async call(method: string, body: Record<string, unknown>): Promise<void> {

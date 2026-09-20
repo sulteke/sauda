@@ -12,6 +12,9 @@ interface ProcessResult {
   remaining: number;
   status: string | null;
   error: string | null;
+  /** Today's publication allowance is spent — stop and resume tomorrow. */
+  dailyLimitReached?: boolean;
+  publishedToday?: number;
 }
 
 async function publishNext(): Promise<ProcessResult> {
@@ -33,6 +36,8 @@ export function PublishQueueButton({ pending }: { pending: number }) {
     setDone(0);
     let count = 0;
 
+    let limitReached = false;
+
     try {
       let keepGoing = true;
       while (keepGoing) {
@@ -41,11 +46,23 @@ export function PublishQueueButton({ pending }: { pending: number }) {
           count += 1;
           setDone(count);
         }
+        // Allowance spent: the server left the boutique PENDING, so another call
+        // would re-select it. Stop here; the rest publishes on the next day.
+        if (result.dailyLimitReached) {
+          limitReached = true;
+          break;
+        }
         keepGoing = result.processed && result.remaining > 0;
       }
-      toast.success(
-        count > 0 ? `Published ${count} boutique${count === 1 ? "" : "s"}` : "Nothing to publish",
-      );
+      if (limitReached) {
+        toast.message("Daily publication limit reached", {
+          description: `Processed ${count} this run. The remaining approved boutiques stay queued for tomorrow.`,
+        });
+      } else {
+        toast.success(
+          count > 0 ? `Published ${count} boutique${count === 1 ? "" : "s"}` : "Nothing to publish",
+        );
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Publishing failed");
     } finally {

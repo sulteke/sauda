@@ -30,6 +30,52 @@ const request = (): AiCategoryRequest => ({
   allowedCategories: allowed,
 });
 
+describe("hashtags in the AI contract", () => {
+  it("asks for no hashtags, and keeps the schema unchanged, without a whitelist", () => {
+    const prompt = buildAiCategoryPrompt(request());
+    expect(prompt).not.toContain("Allowed hashtags");
+    // The profile's own Instagram hashtags are still passed as input data; what
+    // must be absent is the hashtags OUTPUT field.
+    expect(prompt).not.toContain('"hashtags":["#Tag"');
+  });
+
+  it("lists the allowed hashtags and the no-inventing rule when a whitelist is supplied", () => {
+    const prompt = buildAiCategoryPrompt({
+      ...request(),
+      allowedHashtags: ["#Худи", "#Кроссовки"],
+    });
+    expect(prompt).toContain("Allowed hashtags");
+    expect(prompt).toContain("#Худи");
+    expect(prompt).toContain("#Кроссовки");
+    expect(prompt).toContain("NEVER invent");
+    expect(prompt).toContain('"hashtags"');
+    // Hashtags are a separate field, not folded into the categories.
+    expect(prompt).toContain("SEPARATE field");
+  });
+
+  it("keeps only whitelisted hashtags from the model reply", () => {
+    const result = parseAiCategoryResult(
+      '{"categories":[],"hashtags":["#Худи","#ЧтоТоВыдуманное","кроссовки"]}',
+    );
+    expect(result.hashtags).toEqual(["#Худи", "#Кроссовки"]);
+  });
+
+  it("defaults hashtags to an empty array when the model omits or mangles them", () => {
+    expect(parseAiCategoryResult('{"categories":[]}').hashtags).toEqual([]);
+    expect(parseAiCategoryResult('{"categories":[],"hashtags":"#Худи"}').hashtags).toEqual([]);
+    expect(parseAiCategoryResult("not json").hashtags).toEqual([]);
+    expect(EMPTY_AI_RESULT.hashtags).toEqual([]);
+  });
+
+  it("caps the reply at five hashtags", () => {
+    const result = parseAiCategoryResult({
+      categories: [],
+      hashtags: ["#Худи", "#Футболки", "#Джинсы", "#Обувь", "#Кроссовки", "#Кеды"],
+    });
+    expect(result.hashtags).toHaveLength(5);
+  });
+});
+
 describe("disabled AI provider", () => {
   it("is the default provider and contributes nothing", async () => {
     expect(getAiCategoryProvider()).toBe(disabledAiCategoryProvider);

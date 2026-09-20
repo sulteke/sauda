@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { importUrlSchema } from "@/features/import/schemas";
+import { DailyAnalysisLimitError } from "@/server/ai/analysis-budget";
 import { getCurrentUser } from "@/server/auth";
 import { ImportValidationError } from "@/server/import/errors";
 import { analyzeInstagramProfile } from "@/services/import.service";
@@ -35,6 +36,11 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof ImportValidationError) {
       return NextResponse.json({ error: error.message }, { status: 422 });
+    }
+    // The manual import is budgeted like every other AI path. Surface the real
+    // reason (with the counts) rather than a generic failure.
+    if (error instanceof DailyAnalysisLimitError) {
+      return NextResponse.json({ error: error.message }, { status: 429 });
     }
     console.error("Import analyze failed:", error);
     return NextResponse.json({ error: "Failed to analyze profile" }, { status: 500 });

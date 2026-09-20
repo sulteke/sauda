@@ -2,7 +2,11 @@ import "server-only";
 
 import { Prisma } from "@prisma/client";
 
+import { dailyTelegramPublishLimit } from "@/config/limits";
+import { sanitizeHashtags } from "@/config/telegram-hashtags";
+import { startOfBusinessDay } from "@/lib/business-day";
 import { categoryLabel } from "@/lib/category-engine";
+import { ALMATY, canonicalKzCity } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import {
@@ -25,6 +29,14 @@ export interface TelegramProcessResult {
   status: "PUBLISHED" | "SKIPPED" | "FAILED" | null;
   error: string | null;
   remaining: number;
+  /**
+   * True when the business day's publication allowance is used up. The item was
+   * left untouched (still PENDING) and the caller should stop the loop — it will
+   * publish on the next business day.
+   */
+  dailyLimitReached?: boolean;
+  /** Successful publications recorded so far in the current business day. */
+  publishedToday?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,6 +53,19 @@ export interface TelegramProcessResult {
 /** Approved boutiques still awaiting a publishing decision (telegramStatus=PENDING). */
 async function countPendingPublish(): Promise<number> {
   return prisma.boutique.count({ where: { status: "APPROVED", telegramStatus: "PENDING" } });
+}
+
+/**
+ * Successful publications so far in the current business day.
+ *
+ * Counts `telegramPublishedAt`, which is stamped ONLY when a boutique was
+ * actually posted. Skipped, failed, pending and approved-but-unpublished rows
+ * have it null and therefore never consume the allowance.
+ */
+export async function countPublishedToday(now: Date = new Date()): Promise<number> {
+  return prisma.boutique.count({
+    where: { telegramPublishedAt: { gte: startOfBusinessDay(now) } },
+  });
 }
 
 /** Collapses per-target outcomes into the single status we persist today. */
@@ -82,8 +107,54 @@ async function recordOutcome(
       telegramStatus: reduced.status,
       telegramError: failure?.error ?? null,
       telegramFailure: detail,
+      // Stamped only on a real publication — this is what the daily limit counts.
+      ...(reduced.status === "PUBLISHED" ? { telegramPublishedAt: new Date() } : {}),
     },
   });
+}
+
+/** Stored boutique → the destination-agnostic snapshot targets consume. */
+function toPublishable(boutique: {
+  id: string;
+  name: string;
+  city: string | null;
+  telegramOverrideCity: string | null;
+  productCategories: string[];
+  aiResult: unknown;
+  followersCount: number | null;
+  bio: string | null;
+  instagramUrl: string | null;
+  externalUrl: string | null;
+  avatarUrl: string | null;
+  posts: unknown;
+}): PublishableBoutique {
+  const posts = Array.isArray(boutique.posts) ? (boutique.posts as unknown as BoutiquePost[]) : [];
+  // Final detected categories (auto + manual corrections), highest-scoring first.
+  // productCategories is stored in merge order; resolve ids → labels preserving it.
+  const categories = boutique.productCategories
+    .map((id) => categoryLabel(id))
+    .filter((label): label is string => label !== null);
+  // Re-validated against the whitelist on the way out: stored AI results predate
+  // the whitelist, and a stale or hand-edited row must not reach the channel.
+  const aiHashtags =
+    boutique.aiResult && typeof boutique.aiResult === "object"
+      ? (boutique.aiResult as { hashtags?: unknown }).hashtags
+      : undefined;
+
+  return {
+    id: boutique.id,
+    name: boutique.name,
+    city: boutique.city,
+    overrideCity: boutique.telegramOverrideCity,
+    categories,
+    hashtags: sanitizeHashtags(aiHashtags),
+    followersCount: boutique.followersCount,
+    bio: boutique.bio,
+    instagramUrl: boutique.instagramUrl,
+    externalUrl: boutique.externalUrl,
+    avatarUrl: boutique.avatarUrl,
+    posts,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -112,33 +183,59 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
     return { processed: false, boutiqueId: null, status: null, error: null, remaining: 0 };
   }
 
-  const posts = Array.isArray(next.posts) ? (next.posts as unknown as BoutiquePost[]) : [];
-  // Final detected categories (auto + manual corrections), highest-scoring first.
-  // productCategories is stored in merge order; resolve ids → labels preserving it.
-  const categories = next.productCategories
-    .map((id) => categoryLabel(id))
-    .filter((label): label is string => label !== null);
+  const boutique = toPublishable(next);
+  const targets = getTelegramTargets();
 
-  const boutique: PublishableBoutique = {
-    id: next.id,
-    name: next.name,
-    city: next.city,
-    categories,
-    followersCount: next.followersCount,
-    bio: next.bio,
-    instagramUrl: next.instagramUrl,
-    externalUrl: next.externalUrl,
-    avatarUrl: next.avatarUrl,
-    posts,
+  // Daily allowance is checked ONLY for a boutique that would actually post.
+  // An ineligible one publishes nothing, so it still resolves to SKIPPED today
+  // rather than being held back by a limit it cannot consume.
+  const willPublish = targets.some((target) => target.isEligible(boutique));
+  if (willPublish) {
+    const publishedToday = await countPublishedToday();
+    const limit = dailyTelegramPublishLimit();
+    if (publishedToday >= limit) {
+      logger.info("publication.daily_limit_reached", {
+        boutiqueId: next.id,
+        publishedToday,
+        limit,
+      });
+      // Left untouched: still APPROVED + PENDING, first in line tomorrow.
+      return {
+        processed: false,
+        boutiqueId: null,
+        status: null,
+        error: null,
+        remaining: await countPendingPublish(),
+        dailyLimitReached: true,
+        publishedToday,
+      };
+    }
+  }
+
+  const reduced = await runPublication(boutique, targets);
+
+  return {
+    processed: true,
+    boutiqueId: next.id,
+    status: reduced.status,
+    error: reduced.failure?.error ?? null,
+    remaining: await countPendingPublish(),
+    publishedToday: await countPublishedToday(),
   };
+}
 
+/** Runs the engine, logs every outcome in full, and persists the reduced result. */
+async function runPublication(
+  boutique: PublishableBoutique,
+  targets: ReturnType<typeof getTelegramTargets>,
+): Promise<{ status: PublicationStatus; failure: PublicationOutcome | null }> {
   // Target-driven: the engine runs every registered target and reports outcomes.
-  const outcomes = await publishToTargets(boutique, getTelegramTargets());
+  const outcomes = await publishToTargets(boutique, targets);
   for (const outcome of outcomes) {
     // Log the COMPLETE diagnostics (full message + HTTP status + raw response),
     // never a shortened line, so failures are debuggable from the logs alone.
     logger.info("publication.outcome", {
-      boutiqueId: next.id,
+      boutiqueId: boutique.id,
       target: outcome.targetId,
       status: outcome.status,
       ...(outcome.error ? { error: outcome.error } : {}),
@@ -148,13 +245,87 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
   }
 
   const reduced = reduceOutcomes(outcomes);
-  await recordOutcome(next.id, reduced);
+  await recordOutcome(boutique.id, reduced);
+  return reduced;
+}
+
+/** Why a manual publish override was refused. */
+export type PublishOverrideRejection =
+  | "NOT_FOUND"
+  | "NOT_APPROVED"
+  | "CITY_DETECTED"
+  | "DAILY_LIMIT_REACHED";
+
+export interface PublishOverrideResult {
+  ok: boolean;
+  rejection: PublishOverrideRejection | null;
+  status: PublicationStatus | null;
+  error: string | null;
+  publishedToday: number;
+  limit: number;
+}
+
+/**
+ * Manual admin override: publish a boutique whose location could NOT be
+ * detected, after a human confirmed it belongs to the channel's city.
+ *
+ * It records that confirmation in `telegramOverrideCity` and publishes straight
+ * away. Two things it deliberately does NOT do:
+ *  - it never touches the detected `city`; an Unknown boutique stays Unknown in
+ *    the AI data, so detection quality stays measurable;
+ *  - it never bypasses the daily publication limit — an override is a location
+ *    decision, not a quota exemption.
+ *
+ * Only Unknown locations qualify. A boutique whose city WAS detected as some
+ * other city is refused: that is a detection result to correct, not to override.
+ */
+export async function publishWithOverride(
+  boutiqueId: string,
+  overrideCity: string = ALMATY,
+): Promise<PublishOverrideResult> {
+  const limit = dailyTelegramPublishLimit();
+  const reject = async (
+    rejection: PublishOverrideRejection,
+  ): Promise<PublishOverrideResult> => ({
+    ok: false,
+    rejection,
+    status: null,
+    error: null,
+    publishedToday: await countPublishedToday(),
+    limit,
+  });
+
+  const existing = await prisma.boutique.findUnique({ where: { id: boutiqueId } });
+  if (!existing) return reject("NOT_FOUND");
+  if (existing.status !== "APPROVED") return reject("NOT_APPROVED");
+  if (canonicalKzCity(existing.city) !== null) return reject("CITY_DETECTED");
+
+  const publishedToday = await countPublishedToday();
+  if (publishedToday >= limit) {
+    logger.info("publication.override_blocked_by_limit", { boutiqueId, publishedToday, limit });
+    return reject("DAILY_LIMIT_REACHED");
+  }
+
+  // Persist the admin's confirmation first, so the record explains the post even
+  // if publishing then fails — and so a retry stays eligible without re-asking.
+  const updated = await prisma.boutique.update({
+    where: { id: boutiqueId },
+    data: { telegramOverrideCity: overrideCity },
+  });
+  logger.info("publication.override_applied", {
+    boutiqueId,
+    detectedCity: updated.city,
+    overrideCity,
+  });
+
+  const reduced = await runPublication(toPublishable(updated), getTelegramTargets());
 
   return {
-    processed: true,
-    boutiqueId: next.id,
+    ok: reduced.status === "PUBLISHED",
+    rejection: null,
     status: reduced.status,
     error: reduced.failure?.error ?? null,
-    remaining: await countPendingPublish(),
+    publishedToday: await countPublishedToday(),
+    limit,
   };
 }

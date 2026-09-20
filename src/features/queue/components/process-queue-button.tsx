@@ -19,6 +19,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // Terminal outcomes of one queue item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
 const FAILED_STATUSES: ImportQueueStatus[] = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"];
+/** Terminal quality outcome — neither a success nor a failure, so counted apart. */
+const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS"];
 // Items still needing work — used only for the initial progress denominator.
 const ACTIONABLE_STATUSES: ImportQueueStatus[] = [
   "PENDING_PARSE",
@@ -50,7 +52,9 @@ export function ProcessQueueButton() {
 
     let succeeded = 0;
     let failed = 0;
+    let skipped = 0;
     let remaining = 0;
+    let limitReached = false;
 
     try {
       let keepGoing = true;
@@ -62,22 +66,35 @@ export function ProcessQueueButton() {
         const status = result.item?.status;
         if (status && SUCCESS_STATUSES.includes(status)) succeeded += 1;
         else if (status && FAILED_STATUSES.includes(status)) failed += 1;
+        else if (status && SKIPPED_STATUSES.includes(status)) skipped += 1;
 
-        const done = succeeded + failed;
+        const done = succeeded + failed + skipped;
         total = Math.max(total, done + remaining);
         setProgress({ done, total });
+
+        // The daily AI allowance is spent: the server left the item untouched,
+        // so looping would just re-select it. Stop and resume tomorrow.
+        if (result.dailyLimitReached) {
+          limitReached = true;
+          break;
+        }
 
         keepGoing = result.processed && result.remaining > 0;
         // Space out calls so Gemini analyses don't burst into a 429.
         if (keepGoing) await sleep(PROCESS_DELAY_MS);
       }
 
-      const processed = succeeded + failed;
-      if (processed === 0) {
+      const processed = succeeded + failed + skipped;
+      const detail = `Succeeded: ${succeeded} · Failed: ${failed} · Skipped: ${skipped} · Remaining: ${remaining}`;
+      if (limitReached) {
+        toast.message("Daily analysis limit reached", {
+          description: `${detail}. The rest resumes tomorrow.`,
+        });
+      } else if (processed === 0) {
         toast.success("Queue is empty");
       } else {
         toast.success(`Processed ${processed} item${processed === 1 ? "" : "s"}`, {
-          description: `Succeeded: ${succeeded} · Failed: ${failed} · Remaining: ${remaining}`,
+          description: detail,
         });
       }
     } catch (error) {

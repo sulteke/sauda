@@ -12,6 +12,12 @@ const { findFirst, findUnique, findMany, update, updateMany, deleteMany, count }
   }),
 );
 
+/** ImportJob reads: the parsed profile (quality gate) and today's AI calls. */
+const { jobFindUnique, jobCount } = vi.hoisted(() => ({
+  jobFindUnique: vi.fn(),
+  jobCount: vi.fn(),
+}));
+
 const { parseInstagramProfile, analyzeImportJob } = vi.hoisted(() => ({
   parseInstagramProfile: vi.fn(),
   analyzeImportJob: vi.fn(),
@@ -20,6 +26,7 @@ const { parseInstagramProfile, analyzeImportJob } = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     importQueue: { findFirst, findUnique, findMany, update, updateMany, deleteMany, count },
+    importJob: { findUnique: jobFindUnique, count: jobCount },
   },
 }));
 
@@ -34,7 +41,17 @@ import {
 } from "./import-queue.service";
 
 function resetAll() {
-  for (const fn of [findFirst, findUnique, findMany, update, updateMany, deleteMany, count]) {
+  for (const fn of [
+    findFirst,
+    findUnique,
+    findMany,
+    update,
+    updateMany,
+    deleteMany,
+    count,
+    jobFindUnique,
+    jobCount,
+  ]) {
     fn.mockReset();
   }
   parseInstagramProfile.mockReset();
@@ -44,6 +61,9 @@ function resetAll() {
   updateMany.mockResolvedValue({ count: 0 });
   findFirst.mockResolvedValue(null);
   count.mockResolvedValue(0);
+  // Default parsed profile clears the quality gate; no AI calls used today.
+  jobFindUnique.mockResolvedValue({ rawProfile: { followersCount: 50_000 } });
+  jobCount.mockResolvedValue(0);
   update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
     Promise.resolve({
       id: "row",
@@ -218,6 +238,161 @@ describe("processNextImport", () => {
   });
 });
 
+/** Queues one PENDING_ANALYSIS row whose parsed profile has this follower count. */
+function pendingAnalysisWith(followersCount: unknown) {
+  findFirst.mockResolvedValueOnce({
+    id: "q1",
+    instagramUrl: "https://instagram.com/q1",
+    importJobId: "job-1",
+  });
+  jobFindUnique.mockResolvedValue({ rawProfile: { followersCount } });
+}
+
+describe("follower quality gate", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("4,999 followers: never calls the AI and lands in terminal SKIPPED_LOW_FOLLOWERS", async () => {
+    pendingAnalysisWith(4_999);
+
+    const result = await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q1" },
+      data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("4,999") },
+    });
+    // Never marked ANALYZING — the gate runs before any state transition.
+    expect(update).not.toHaveBeenCalledWith({ where: { id: "q1" }, data: { status: "ANALYZING" } });
+    expect(result.processed).toBe(true);
+  });
+
+  it("exactly 5,000 followers qualifies: the AI IS called", async () => {
+    pendingAnalysisWith(5_000);
+    analyzeImportJob.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
+
+    await processNextImport();
+
+    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+  });
+
+  it("10,000 followers qualifies: the AI IS called", async () => {
+    pendingAnalysisWith(10_000);
+    analyzeImportJob.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
+
+    await processNextImport();
+
+    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+  });
+
+  it("skips conservatively when the follower count is unavailable (null)", async () => {
+    pendingAnalysisWith(null);
+
+    await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q1" },
+      data: { status: "SKIPPED_LOW_FOLLOWERS", error: "Skipped: follower count unavailable." },
+    });
+  });
+
+  it("keeps an unparsed job retryable (ANALYSIS_FAILED) instead of skipping it", async () => {
+    findFirst.mockResolvedValueOnce({
+      id: "q1",
+      instagramUrl: "https://instagram.com/q1",
+      importJobId: "job-1",
+    });
+    jobFindUnique.mockResolvedValue({ rawProfile: null });
+    analyzeImportJob.mockRejectedValue(new Error("Import job has not been parsed yet"));
+
+    await processNextImport();
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q1" },
+      data: { status: "ANALYSIS_FAILED", error: "Import job has not been parsed yet" },
+    });
+  });
+});
+
+describe("daily analysis limit", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("allows the 20th AI call of the day", async () => {
+    pendingAnalysisWith(50_000);
+    jobCount.mockResolvedValue(19);
+    analyzeImportJob.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
+
+    const result = await processNextImport();
+
+    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+    expect(result.dailyLimitReached).toBeUndefined();
+  });
+
+  it("blocks the 21st AI call and leaves the item untouched for the next day", async () => {
+    pendingAnalysisWith(50_000);
+    jobCount.mockResolvedValue(20);
+
+    const result = await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+    // Nothing written: the row is still PENDING_ANALYSIS, first in line tomorrow.
+    expect(update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ processed: false, item: null, dailyLimitReached: true });
+  });
+
+  it("counts every AI invocation, including one that failed", async () => {
+    // analyzedAt is stamped at invocation time, so the count query is the only
+    // thing the limit consults — a failed call is already included in it.
+    pendingAnalysisWith(50_000);
+    jobCount.mockResolvedValue(20);
+
+    await processNextImport();
+
+    expect(jobCount).toHaveBeenCalledWith({
+      where: { analyzedAt: { gte: expect.any(Date) } },
+    });
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+  });
+
+  it("low-follower accounts consume no slot: they are still skipped at the limit", async () => {
+    pendingAnalysisWith(1_200);
+    jobCount.mockResolvedValue(20);
+
+    const result = await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q1" },
+      data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("1,200") },
+    });
+    // Processed normally — the allowance was never consulted for this item.
+    expect(result.dailyLimitReached).toBeUndefined();
+  });
+
+  it("does not start a new Apify parse once the allowance is spent", async () => {
+    findFirst
+      .mockResolvedValueOnce(null) // no pending analysis
+      .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    jobCount.mockResolvedValue(20);
+
+    const result = await processNextImport();
+
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(result.dailyLimitReached).toBe(true);
+  });
+});
+
 describe("retryQueueItem", () => {
   beforeEach(() => {
     resetAll();
@@ -241,6 +416,12 @@ describe("retryQueueItem", () => {
       where: { id: "r2" },
       data: { status: "PENDING_ANALYSIS", error: null },
     });
+  });
+
+  it("refuses to retry a SKIPPED_LOW_FOLLOWERS item — the skip is terminal", async () => {
+    findUnique.mockResolvedValue({ id: "r4", status: "SKIPPED_LOW_FOLLOWERS" });
+    await expect(retryQueueItem("r4")).rejects.toThrow(/Cannot retry/);
+    expect(update).not.toHaveBeenCalled();
   });
 
   it("refuses to retry an item that is not in a failed state", async () => {
@@ -289,6 +470,13 @@ describe("clearQueue", () => {
     expect(deleteMany).toHaveBeenCalledWith({
       where: { status: { in: ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"] } },
     });
+  });
+
+  it("never deletes SKIPPED_LOW_FOLLOWERS as part of Clear Failed", async () => {
+    deleteMany.mockResolvedValue({ count: 0 });
+    await clearQueue("FAILED");
+    const where = (deleteMany.mock.calls[0]?.[0] as { where: { status: { in: string[] } } }).where;
+    expect(where.status.in).not.toContain("SKIPPED_LOW_FOLLOWERS");
   });
 
   it("clears every row for ALL (no status filter)", async () => {

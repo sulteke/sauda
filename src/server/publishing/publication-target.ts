@@ -16,10 +16,21 @@ import type { BoutiquePost } from "@/types";
 export interface PublishableBoutique {
   id: string;
   name: string;
-  /** Canonical city (drives per-target eligibility, e.g. Almaty-only). */
+  /** Detected city (drives per-target eligibility, e.g. Almaty-only). */
   city: string | null;
+  /**
+   * City an admin explicitly confirmed for publication when `city` could not be
+   * detected. Targets treat it as EQUIVALENT to `city` for eligibility only;
+   * the detected `city` above is never rewritten.
+   */
+  overrideCity: string | null;
   /** Final detected category labels, highest-scoring first. */
   categories: string[];
+  /**
+   * Whitelisted hashtags chosen by the AI. Empty for boutiques analyzed before
+   * hashtags existed — targets fall back to the category labels.
+   */
+  hashtags: string[];
   followersCount: number | null;
   bio: string | null;
   instagramUrl: string | null;

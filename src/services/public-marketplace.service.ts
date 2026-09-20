@@ -53,6 +53,8 @@ function toPublicDTO(row: Boutique): BoutiqueDTO {
     telegramStatus: row.telegramStatus,
     telegramError: row.telegramError,
     telegramFailure: parseTelegramFailure(row.telegramFailure),
+    telegramOverrideCity: row.telegramOverrideCity,
+    telegramPublishedAt: row.telegramPublishedAt?.toISOString() ?? null,
     posts: parsePosts(row.posts),
     isVerified: row.isVerified,
     isBusinessAccount: row.isBusinessAccount,

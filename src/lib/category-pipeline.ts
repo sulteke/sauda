@@ -1,3 +1,4 @@
+import { TELEGRAM_HASHTAG_LIST } from "@/config/telegram-hashtags";
 import type { CategoryMatch, DetectedCategory, ProductCategory } from "@/types/category";
 import type { BoutiqueEnrichment } from "@/types/enrichment";
 import type { InstagramBusinessAddress, InstagramExternalLink } from "@/types/instagram";
@@ -170,6 +171,7 @@ function toAiRequest(
     hashtags: uniqStrings(input.posts.flatMap((p) => p.hashtags ?? [])),
     mentions: uniqStrings(input.posts.flatMap((p) => p.mentions ?? [])),
     allowedCategories: config.dictionary.map(({ id, label }) => ({ id, label })),
+    allowedHashtags: TELEGRAM_HASHTAG_LIST,
     keywordResults: context.keywordResults,
     enrichment: context.enrichment,
   };

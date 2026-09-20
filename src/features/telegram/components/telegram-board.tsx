@@ -5,6 +5,7 @@ import type { LucideIcon } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FailedBoutiqueCard } from "@/features/telegram/components/failed-boutique-card";
+import { SkippedBoutiqueCard } from "@/features/telegram/components/skipped-boutique-card";
 import type { BoutiqueDTO } from "@/types";
 
 /** Shared card shell with a title, an icon, and a count badge. */
@@ -37,12 +38,10 @@ function Column({
   title,
   icon,
   items,
-  showCity = false,
 }: {
   title: string;
   icon: LucideIcon;
   items: BoutiqueDTO[];
-  showCity?: boolean;
 }) {
   return (
     <ColumnShell title={title} icon={icon} count={items.length}>
@@ -59,16 +58,25 @@ function Column({
             </Avatar>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium">{boutique.name}</div>
-              {showCity ? (
-                <div className="truncate text-xs text-muted-foreground">
-                  📍 {boutique.city ?? "Unknown"}
-                </div>
-              ) : boutique.category ? (
+              {boutique.category ? (
                 <div className="truncate text-xs text-muted-foreground">{boutique.category}</div>
               ) : null}
             </div>
           </div>
         ))
+      )}
+    </ColumnShell>
+  );
+}
+
+/** Skipped column — shows the detected city, and offers the Unknown-only override. */
+function SkippedColumn({ items }: { items: BoutiqueDTO[] }) {
+  return (
+    <ColumnShell title="Skipped (not Almaty)" icon={SkipForward} count={items.length}>
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">None.</p>
+      ) : (
+        items.map((boutique) => <SkippedBoutiqueCard key={boutique.id} boutique={boutique} />)
       )}
     </ColumnShell>
   );
@@ -102,7 +110,7 @@ export function TelegramBoard({
     <div className="grid gap-4 lg:grid-cols-4">
       <Column title="Pending publications" icon={Clock} items={pending} />
       <Column title="Published" icon={CheckCircle2} items={published} />
-      <Column title="Skipped (not Almaty)" icon={SkipForward} items={skipped} showCity />
+      <SkippedColumn items={skipped} />
       <FailedColumn items={failed} />
     </div>
   );

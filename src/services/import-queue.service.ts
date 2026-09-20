@@ -2,8 +2,10 @@ import "server-only";
 
 import type { ImportQueue } from "@prisma/client";
 
+import { minFollowersForAnalysis } from "@/config/limits";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { checkDailyAnalysisBudget, countAnalysesToday } from "@/server/ai/analysis-budget";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
 import { analyzeImportJob, parseInstagramProfile } from "@/services/import.service";
 import type { ImportQueueItemDTO } from "@/types";
@@ -60,7 +62,11 @@ export async function deleteQueueItem(id: string): Promise<{ deleted: number }> 
 
 /** Statuses that represent a fully-imported boutique (new + legacy). */
 const SUCCESS_STATUSES = ["READY_FOR_REVIEW", "COMPLETED"] as const;
-/** Stage-scoped + legacy failure statuses. */
+/**
+ * Stage-scoped + legacy failure statuses. SKIPPED_LOW_FOLLOWERS is deliberately
+ * NOT here: it is a quality decision, not a failure, so "Clear Failed" leaves it
+ * alone and the retry path refuses it.
+ */
 const FAILED_STATUSES = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"] as const;
 /** Statuses with work still to do (not yet complete, not failed). */
 const ACTIONABLE_STATUSES = [
@@ -89,6 +95,14 @@ export interface ProcessResult {
   processed: boolean;
   item: ImportQueueItemDTO | null;
   remaining: number;
+  /**
+   * True when the business day's AI allowance is used up. The selected item was
+   * left in PENDING_ANALYSIS, so the caller should stop the loop; the work
+   * resumes untouched on the next business day.
+   */
+  dailyLimitReached?: boolean;
+  /** AI calls issued so far in the current business day. */
+  analyzedToday?: number;
 }
 
 /** A job stuck mid-stage longer than this is treated as dead and re-queued. */
@@ -195,12 +209,35 @@ export async function processNextImport(): Promise<ProcessResult> {
   });
   if (analyzeRow) return runAnalyzeStage(analyzeRow.id, analyzeRow.instagramUrl, analyzeRow.importJobId);
 
-  // Stage 1 — start the next parse.
+  // Stage 1 — start the next parse, unless today's AI allowance is already gone.
+  // Scraping more profiles now would only pile up work that cannot be analyzed
+  // until tomorrow, so it is bounded here rather than after the Apify spend.
   const parseRow = await prisma.importQueue.findFirst({
     where: { status: "PENDING_PARSE" },
     orderBy: { createdAt: "asc" },
   });
-  if (parseRow) return runParseStage(parseRow.id, parseRow.instagramUrl);
+  if (parseRow) {
+    const budget = await checkDailyAnalysisBudget();
+    if (budget.reached) {
+      const remaining = await countRemaining();
+      logger.info("queue.daily_limit_reached", {
+        id: parseRow.id,
+        instagramUrl: parseRow.instagramUrl,
+        stage: "parse",
+        analyzedToday: budget.used,
+        limit: budget.limit,
+        remaining,
+      });
+      return {
+        processed: false,
+        item: null,
+        remaining,
+        dailyLimitReached: true,
+        analyzedToday: budget.used,
+      };
+    }
+    return runParseStage(parseRow.id, parseRow.instagramUrl);
+  }
 
   logger.info("queue.finished", { reason: "no-actionable-jobs" });
   return { processed: false, item: null, remaining: 0 };
@@ -248,8 +285,40 @@ async function runParseStage(id: string, instagramUrl: string): Promise<ProcessR
 }
 
 /**
+ * Re-exported so queue callers have one obvious place to read the counter from.
+ * The rule itself lives in the AI budget module, which every model-invoking path
+ * shares — the queue only chooses how to PRESENT a refusal (a stop signal, not a
+ * failed item), it does not decide the limit.
+ */
+export { countAnalysesToday };
+
+/**
+ * Reads the follower count from an already-parsed profile.
+ *
+ * Returns `undefined` when there is no parsed profile at all (a parse problem,
+ * which must stay a retryable failure) and `null` when the profile exists but
+ * carries no usable follower count (a quality decision).
+ */
+function parsedFollowerCount(rawProfile: unknown): number | null | undefined {
+  if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return undefined;
+  const value = (rawProfile as { followersCount?: unknown }).followersCount;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
  * Analyze stage: reloads the parsed payload and runs Gemini (NO Apify).
  * PENDING_ANALYSIS → ANALYZING → READY_FOR_REVIEW / ANALYSIS_FAILED.
+ *
+ * Two gates run BEFORE any AI call, in this order:
+ *  1. Quality — an account below the follower threshold (or with no follower
+ *     count) is worth no AI spend, so it lands in the terminal
+ *     SKIPPED_LOW_FOLLOWERS. Its parsed data is preserved and, crucially, it
+ *     consumes none of the daily allowance.
+ *  2. Daily allowance — when today's AI calls are used up the item is left
+ *     exactly as it was (PENDING_ANALYSIS) and the caller is told to stop.
+ *
+ * The order matters: gating on quality first is what lets a queue full of small
+ * accounts keep draining for free instead of stalling behind the allowance.
  */
 async function runAnalyzeStage(
   id: string,
@@ -257,7 +326,6 @@ async function runAnalyzeStage(
   importJobId: string | null,
 ): Promise<ProcessResult> {
   logger.info("queue.analyze_selected", { id, instagramUrl });
-  await prisma.importQueue.update({ where: { id }, data: { status: "ANALYZING" } });
   const startedAt = Date.now();
 
   if (!importJobId) {
@@ -272,6 +340,61 @@ async function runAnalyzeStage(
     return { processed: true, item: toDTO(updated), remaining };
   }
 
+  // Gate 1 — quality. Never reached for an unparsed job (followers === undefined):
+  // that is a parse problem and stays a retryable ANALYSIS_FAILED below.
+  const job = await prisma.importJob.findUnique({
+    where: { id: importJobId },
+    select: { rawProfile: true },
+  });
+  const followers = parsedFollowerCount(job?.rawProfile);
+  const minFollowers = minFollowersForAnalysis();
+  if (followers !== undefined && (followers === null || followers < minFollowers)) {
+    const message =
+      followers === null
+        ? "Skipped: follower count unavailable."
+        : `Skipped: ${followers.toLocaleString("en-US")} followers — below the ${minFollowers.toLocaleString("en-US")} minimum.`;
+    const updated = await prisma.importQueue.update({
+      where: { id },
+      data: { status: "SKIPPED_LOW_FOLLOWERS", error: message },
+    });
+    const remaining = await countRemaining();
+    logger.info("queue.analyze_skipped", {
+      id,
+      instagramUrl,
+      status: "SKIPPED_LOW_FOLLOWERS",
+      followersCount: followers,
+      minFollowers,
+      remaining,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
+  }
+
+  // Gate 2 — daily allowance, read from the shared AI budget. The pipeline
+  // enforces the same budget again at the call site; asking here first is what
+  // turns a refusal into a clean stop instead of a spurious ANALYSIS_FAILED.
+  const budget = await checkDailyAnalysisBudget();
+  if (budget.reached) {
+    const remaining = await countRemaining();
+    logger.info("queue.daily_limit_reached", {
+      id,
+      instagramUrl,
+      analyzedToday: budget.used,
+      limit: budget.limit,
+      remaining,
+    });
+    // Left untouched in PENDING_ANALYSIS — picked up first on the next day.
+    return {
+      processed: false,
+      item: null,
+      remaining,
+      dailyLimitReached: true,
+      analyzedToday: budget.used,
+    };
+  }
+  const analyzedToday = budget.used;
+
+  await prisma.importQueue.update({ where: { id }, data: { status: "ANALYZING" } });
+
   try {
     await analyzeImportJob(importJobId);
     const updated = await prisma.importQueue.update({
@@ -285,7 +408,7 @@ async function runAnalyzeStage(
       durationMs: Date.now() - startedAt,
       remaining,
     });
-    return { processed: true, item: toDTO(updated), remaining };
+    return { processed: true, item: toDTO(updated), remaining, analyzedToday: analyzedToday + 1 };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Analysis failed";
     const updated = await prisma.importQueue.update({
@@ -300,7 +423,8 @@ async function runAnalyzeStage(
       remaining,
       error: message,
     });
-    return { processed: true, item: toDTO(updated), remaining };
+    // A failed AI call still consumed quota, so it still counts toward today.
+    return { processed: true, item: toDTO(updated), remaining, analyzedToday: await countAnalysesToday() };
   }
 }
 

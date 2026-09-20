@@ -107,6 +107,13 @@ export interface BoutiqueDTO {
   telegramError: string | null;
   /** Structured detail of the last publish failure (null on success). */
   telegramFailure: TelegramFailureDetail | null;
+  /**
+   * City an admin confirmed for publication when `city` could not be detected.
+   * Publication-eligibility only — `city` itself is never rewritten.
+   */
+  telegramOverrideCity: string | null;
+  /** When the boutique was actually posted (null unless it was). */
+  telegramPublishedAt: string | null;
   posts: BoutiquePost[];
   // Richer Instagram metadata captured at import time (nullable / defaulted so
   // rows imported before this milestone still serialize cleanly).

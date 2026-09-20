@@ -21,6 +21,8 @@ const PROCESS_DELAY_MS = 4000;
 // Terminal import-queue outcomes for one item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
 const FAILED_STATUSES: ImportQueueStatus[] = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"];
+/** Below the follower quality gate — no AI was spent, so it is not a failure. */
+const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS"];
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,6 +44,7 @@ interface Progress {
   totalBatches: number;
   succeeded: number;
   failed: number;
+  skipped: number;
 }
 
 function Stat({ label, value }: { label: string; value: string | number }) {
@@ -79,19 +82,29 @@ export function AutoImportPanel() {
     let batch = 0;
     let succeeded = 0;
     let failed = 0;
+    let skipped = 0;
+    let limitReached = false;
     const render = () =>
-      setProgress({ discovered, imported, batch, totalBatches, succeeded, failed });
+      setProgress({ discovered, imported, batch, totalBatches, succeeded, failed, skipped });
     render();
 
     // Drain the import queue via the existing single-stage endpoint, counting the
-    // terminal outcome of each item. Stops when the queue is empty or on Stop.
+    // terminal outcome of each item. Stops when the queue is empty, when the day's
+    // analysis allowance runs out, or on Stop.
     async function drainQueue() {
       while (!stopRef.current) {
         const result = await processNext.mutateAsync();
         const status = result.item?.status;
         if (status && SUCCESS_STATUSES.includes(status)) succeeded += 1;
         else if (status && FAILED_STATUSES.includes(status)) failed += 1;
+        else if (status && SKIPPED_STATUSES.includes(status)) skipped += 1;
         render();
+        // Allowance spent: the server left the item untouched, so another call
+        // would re-select it. Stop here; the rest waits for the next day.
+        if (result.dailyLimitReached) {
+          limitReached = true;
+          break;
+        }
         if (!result.processed || result.remaining === 0) break;
         await sleep(PROCESS_DELAY_MS);
       }
@@ -101,7 +114,7 @@ export function AutoImportPanel() {
       // Resume-safe: finish anything already in the queue before taking new batches.
       await drainQueue();
 
-      while (!stopRef.current) {
+      while (!stopRef.current && !limitReached) {
         const candidates = await fetchNewCandidates();
         if (candidates.length === 0) break;
 
@@ -116,16 +129,21 @@ export function AutoImportPanel() {
         await drainQueue();
       }
 
-      const processed = succeeded + failed;
-      if (stopRef.current) {
+      const processed = succeeded + failed + skipped;
+      const detail = `Succeeded ${succeeded} · Failed ${failed} · Skipped ${skipped}`;
+      if (limitReached) {
+        toast.message("Daily analysis limit reached", {
+          description: `${processed} processed · ${detail}. Remaining candidates stay queued for tomorrow.`,
+        });
+      } else if (stopRef.current) {
         toast.message("Import paused", {
-          description: `Processed ${processed} · Succeeded ${succeeded} · Failed ${failed}. Click Start Import to resume.`,
+          description: `Processed ${processed} · ${detail}. Click Start Import to resume.`,
         });
       } else if (processed === 0 && imported === 0) {
         toast.success("Nothing to import");
       } else {
         toast.success("Import complete", {
-          description: `${processed} processed · Succeeded ${succeeded} · Failed ${failed}`,
+          description: `${processed} processed · ${detail}`,
         });
       }
     } catch (error) {
@@ -146,6 +164,7 @@ export function AutoImportPanel() {
     totalBatches: Math.max(1, Math.ceil(newCount / MAX_BATCH_SIZE)),
     succeeded: 0,
     failed: 0,
+    skipped: 0,
   };
   const remaining = Math.max(0, shown.discovered - shown.imported);
 
@@ -173,12 +192,13 @@ export function AutoImportPanel() {
       </div>
 
       {running || progress ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
           <Stat label="Discovered" value={shown.discovered} />
           <Stat label="Imported" value={shown.imported} />
           <Stat label="Remaining" value={remaining} />
           <Stat label="Batch" value={`${shown.batch} / ${shown.totalBatches}`} />
           <Stat label="Succeeded" value={shown.succeeded} />
+          <Stat label="Skipped" value={shown.skipped} />
           <Stat label="Failed" value={shown.failed} />
         </div>
       ) : null}

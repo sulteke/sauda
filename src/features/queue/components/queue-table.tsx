@@ -28,6 +28,7 @@ const STATUS_LABEL: Record<ImportQueueStatus, string> = {
   READY_FOR_REVIEW: "Ready for review",
   PARSE_FAILED: "Parse failed",
   ANALYSIS_FAILED: "Analysis failed",
+  SKIPPED_LOW_FOLLOWERS: "Skipped (low followers)",
   // Legacy (pre two-stage split).
   PENDING: "Pending",
   PROCESSING: "Processing",
@@ -46,6 +47,8 @@ const STATUS_VARIANT: Record<
   READY_FOR_REVIEW: "default",
   PARSE_FAILED: "destructive",
   ANALYSIS_FAILED: "destructive",
+  // A quality decision, not a failure — deliberately not destructive.
+  SKIPPED_LOW_FOLLOWERS: "secondary",
   // Legacy (pre two-stage split).
   PENDING: "outline",
   PROCESSING: "secondary",
