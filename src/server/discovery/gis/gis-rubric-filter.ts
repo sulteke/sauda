@@ -22,7 +22,11 @@ const FASHION_RUBRICS: readonly string[] = [
   "украшени",
   "ювелир",
   "джинс",
-  "бель", // нижнее бельё
+  // Full words only: the stem "бель" also occurs inside "мебель", which put an
+  // office-furniture shop through the filter on a real Aport run.
+  "бельё",
+  "белье",
+  "нижнее бель",
   "трикотаж",
   "головные убор",
   "кожгалантере",
@@ -31,6 +35,9 @@ const FASHION_RUBRICS: readonly string[] = [
   "спорттовар",
   "спортивная",
   "секонд-хенд",
+  "носк",
+  "колготк",
+  "чулочно",
   "бутик",
   "модн",
   "очк", // оптика / солнцезащитные очки
@@ -83,3 +90,29 @@ export function partitionByRubric<T extends { rubric?: string | null }>(
   }
   return { relevant, excluded };
 }
+
+/**
+ * Search terms used to PARTITION a venue into several queries.
+ *
+ * A single `building_id` query can only reach a bounded window (a demo key caps
+ * at page 5 x page_size 10 = 50 results), while a mall holds hundreds. Querying
+ * per fashion term gives each term its own window, so coverage is far wider AND
+ * aimed at the stores we actually want — instead of paging through a food court
+ * to reach a boutique.
+ *
+ * The empty string runs the plain venue query first, so small venues need only
+ * one round trip.
+ */
+export const FASHION_QUERIES: readonly string[] = [
+  "",
+  "одежда",
+  "обувь",
+  "аксессуары",
+  "сумки",
+  "бельё",
+  "спортивная одежда",
+  "детская одежда",
+  "ювелирные изделия",
+  "очки",
+  "часы",
+];

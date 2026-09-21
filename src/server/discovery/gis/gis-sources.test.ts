@@ -109,6 +109,32 @@ describe("rubric filtering", () => {
     expect(isFashionRubric("Прокат одежды")).toBe(false);
   });
 
+  it("does not let a fashion stem match inside an unrelated word", () => {
+    // Regression from a real Aport run: "бель" (нижнее бельё) matched "мебель".
+    expect(isFashionRubric("Офисная мебель")).toBe(false);
+    expect(isFashionRubric("Мебельный магазин")).toBe(false);
+    expect(isFashionRubric("Нижнее бельё")).toBe(true);
+  });
+
+  it("accepts the rubrics a real Aport Mall West run returned", () => {
+    for (const rubric of [
+      "Мужская одежда",
+      "Женская одежда",
+      "Детская одежда",
+      "Обувные магазины",
+      "Детская обувь",
+      "Спортивная одежда и обувь",
+      "Ювелирные изделия",
+      "Бижутерия",
+      "Носки и колготки",
+    ]) {
+      expect(isFashionRubric(rubric), rubric).toBe(true);
+    }
+    for (const rubric of ["Быстрое питание", "Банки", "Мобильные операторы", "Оптика", "Офисная мебель"]) {
+      expect(isFashionRubric(rubric), rubric).toBe(false);
+    }
+  });
+
   it("treats a missing rubric as not relevant — silence is not evidence", () => {
     expect(isFashionRubric(null)).toBe(false);
     expect(isFashionRubric(undefined)).toBe(false);
