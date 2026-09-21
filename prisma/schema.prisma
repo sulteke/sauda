@@ -64,86 +64,86 @@ enum ImportStatus {
 /// A boutique record. Populated by the import pipeline (auto-discovery), not by
 /// manual data entry. `instagramHandle` is the dedup key across re-imports.
 model Boutique {
-  id             String         @id @default(uuid())
-  name           String
-  slug           String         @unique
-  description    String?
-  city           String?
-  status         BoutiqueStatus @default(DRAFT)
+  id                      String                @id @default(uuid())
+  name                    String
+  slug                    String                @unique
+  description             String?
+  city                    String?
+  status                  BoutiqueStatus        @default(DRAFT)
   /// Detected administrative region / oblast (optional; reserved for future use).
-  region         String?
+  region                  String?
   /// Detected country (e.g. "Kazakhstan"). Null when the city is unrecognized.
-  country        String?
-  instagramHandle String?       @unique @map("instagram_handle")
-  instagramUrl   String?        @map("instagram_url")
-  avatarUrl      String?        @map("avatar_url")
-  bio            String?
+  country                 String?
+  instagramHandle         String?               @unique @map("instagram_handle")
+  instagramUrl            String?               @map("instagram_url")
+  avatarUrl               String?               @map("avatar_url")
+  bio                     String?
   /// Primary auto-detected product category label (backward-compatible single value).
-  category       String?
+  category                String?
   /// Final product-category ids: auto-detected, plus manual adds, minus manual removes.
-  productCategories String[]    @default([]) @map("product_categories")
+  productCategories       String[]              @default([]) @map("product_categories")
   /// Final auto-detected (keyword + AI) scored breakdown + evidence — the merged "why".
-  categoryScores Json?          @map("category_scores")
+  categoryScores          Json?                 @map("category_scores")
   /// Keyword-engine result only, kept separate so keyword evidence is never overwritten.
-  keywordScores Json?           @map("keyword_scores")
+  keywordScores           Json?                 @map("keyword_scores")
   /// Raw AI provider result (categories + confidence + reasons, city, mall, address,
   /// targetAudience, priceSegment, style, summary). Null when no AI ran.
-  aiResult      Json?           @map("ai_result")
+  aiResult                Json?                 @map("ai_result")
   /// Whitelisted Telegram hashtags actually published for this boutique (2–5).
   /// Separate from `aiResult.hashtags`, which records only what the model said:
   /// this column is the published set, so a deterministic top-up or a backfill
   /// can fill it without ever rewriting the AI's own record. Independent of the
   /// category fields — hashtags describe how a boutique is advertised, not how
   /// it is classified.
-  hashtags      String[]        @default([])
+  hashtags                String[]              @default([])
   /// Category ids an admin added by hand (Stage 3).
-  manualCategoriesAdded String[] @default([]) @map("manual_categories_added")
+  manualCategoriesAdded   String[]              @default([]) @map("manual_categories_added")
   /// Category ids an admin removed by hand (Stage 3).
-  manualCategoriesRemoved String[] @default([]) @map("manual_categories_removed")
+  manualCategoriesRemoved String[]              @default([]) @map("manual_categories_removed")
   /// Structured business info derived from imported data (phones, links, city, hours…).
-  enrichment     Json?          @map("enrichment")
-  followersCount Int?           @map("followers_count")
-  externalUrl    String?        @map("external_url")
+  enrichment              Json?                 @map("enrichment")
+  followersCount          Int?                  @map("followers_count")
+  externalUrl             String?               @map("external_url")
   /// First recent Instagram posts captured at import time (array of post objects).
-  posts          Json?
+  posts                   Json?
   /// Whether the source Instagram account is verified.
-  isVerified        Boolean? @map("is_verified")
+  isVerified              Boolean?              @map("is_verified")
   /// Whether the source account is an Instagram business/professional account.
-  isBusinessAccount Boolean? @map("is_business_account")
+  isBusinessAccount       Boolean?              @map("is_business_account")
   /// Whether the source account is private.
-  isPrivate         Boolean? @map("is_private")
+  isPrivate               Boolean?              @map("is_private")
   /// Total posts on the source account (not the number captured here).
-  postsCount        Int?     @map("posts_count")
+  postsCount              Int?                  @map("posts_count")
   /// Number of accounts the source account follows.
-  followsCount      Int?     @map("follows_count")
+  followsCount            Int?                  @map("follows_count")
   /// Physical business address, when the account publishes one (object).
-  businessAddress   Json?    @map("business_address")
+  businessAddress         Json?                 @map("business_address")
   /// All labeled external links on the profile (array of {title, url}).
-  externalUrls      Json?    @map("external_urls")
+  externalUrls            Json?                 @map("external_urls")
   /// Related/suggested profiles surfaced with the profile (array).
-  relatedProfiles   Json?    @map("related_profiles")
+  relatedProfiles         Json?                 @map("related_profiles")
   /// Whether this boutique is queued to be pushed to the (future) Telegram channel.
-  telegramQueued Boolean        @default(false) @map("telegram_queued")
+  telegramQueued          Boolean               @default(false) @map("telegram_queued")
   /// Telegram publishing state — independent of the approval `status`. The
   /// publisher decides whether to post (by city) and records the outcome here;
   /// approval never changes it and it never changes approval.
-  telegramStatus TelegramPublishStatus @default(PENDING) @map("telegram_status")
+  telegramStatus          TelegramPublishStatus @default(PENDING) @map("telegram_status")
   /// Failure reason from the last Telegram publish attempt (null on success).
   /// Stores the COMPLETE, untruncated Telegram API message for debugging.
-  telegramError  String?        @map("telegram_error")
+  telegramError           String?               @map("telegram_error")
   /// Structured detail of the last publish failure (target, HTTP status, full
   /// API response, timestamp) for the UI's "View details". Null on success.
-  telegramFailure Json?         @map("telegram_failure")
+  telegramFailure         Json?                 @map("telegram_failure")
   /// Admin-set city used ONLY for Telegram publication eligibility, when the
   /// detected `city` is Unknown and a human confirms the boutique is relevant
   /// to the channel's city. NEVER overwrites the AI-detected `city`.
-  telegramOverrideCity String?  @map("telegram_override_city")
+  telegramOverrideCity    String?               @map("telegram_override_city")
   /// When the boutique was successfully posted to Telegram. This is the ONLY
   /// source of truth for the per-business-day publication limit, so skipped,
   /// failed, pending and approved-but-unpublished boutiques never count.
-  telegramPublishedAt DateTime? @map("telegram_published_at")
-  createdAt      DateTime       @default(now()) @map("created_at")
-  updatedAt      DateTime       @updatedAt @map("updated_at")
+  telegramPublishedAt     DateTime?             @map("telegram_published_at")
+  createdAt               DateTime              @default(now()) @map("created_at")
+  updatedAt               DateTime              @updatedAt @map("updated_at")
 
   importJobs ImportJob[]
 
@@ -251,6 +251,21 @@ model ImportQueue {
 enum DiscoverySeedType {
   PROFILE
   HASHTAG
+  /// A physical location (2GIS building/place): discovery starts from the venue,
+  /// enumerates the businesses inside it, and only then resolves Instagram.
+  GIS_LOCATION
+}
+
+/// How far a 2GIS store got on its way into the Instagram pipeline.
+///   NEW             - enumerated, not yet resolved
+///   INSTAGRAM_FOUND - a reliable Instagram account was found; a candidate exists
+///   NO_INSTAGRAM    - no reliable account found; kept so we know it was seen
+///   KNOWN           - its Instagram is already a boutique or an earlier candidate
+enum GisStoreStatus {
+  NEW
+  INSTAGRAM_FOUND
+  NO_INSTAGRAM
+  KNOWN
 }
 
 /// Lifecycle of a discovered candidate account.
@@ -269,6 +284,10 @@ model DiscoveryCandidate {
   seedType     DiscoverySeedType        @map("seed_type")
   seedValue    String                   @map("seed_value")
   source       String?
+  /// Where this candidate came from, beyond the seed — e.g. for 2GIS the
+  /// { locationId, locationName, gisUrl, gisId } of the store it was found in.
+  /// Null for Instagram-sourced candidates, which the seed already describes.
+  sourceMeta   Json?                    @map("source_meta")
   status       DiscoveryCandidateStatus @default(NEW)
   createdAt    DateTime                 @default(now()) @map("created_at")
   updatedAt    DateTime                 @updatedAt @map("updated_at")
@@ -276,4 +295,44 @@ model DiscoveryCandidate {
   @@unique([handle, seedValue])
   @@index([status])
   @@map("discovery_candidates")
+}
+
+/// A business enumerated from a 2GIS location (mall/building). This is the
+/// LOCATION-FIRST half of discovery: 2GIS tells us which stores exist at a
+/// venue, and only stores with a reliably-resolved Instagram account become a
+/// DiscoveryCandidate and enter the existing Instagram pipeline.
+///
+/// Stores WITHOUT Instagram are kept deliberately (NO_INSTAGRAM), so a later run
+/// knows the venue was already enumerated and does not re-resolve them.
+model GisStore {
+  id              String         @id @default(uuid())
+  /// 2GIS object id — the dedup key for a store across runs.
+  gisId           String         @unique @map("gis_id")
+  name            String
+  address         String?
+  phone           String?
+  website         String?
+  /// Category as 2GIS labels it ("Магазин одежды"); drives the fashion filter.
+  rubric          String?
+  latitude        Float?
+  longitude       Float?
+  /// The 2GIS location this store was enumerated from (building or place id).
+  locationId      String         @map("location_id")
+  locationName    String?        @map("location_name")
+  gisUrl          String?        @map("gis_url")
+  /// Which source produced it: "api" (official Places API) or "apify".
+  source          String
+  status          GisStoreStatus @default(NEW)
+  /// Normalized (lowercase) Instagram handle, when one was reliably resolved.
+  instagramHandle String?        @map("instagram_handle")
+  instagramUrl    String?        @map("instagram_url")
+  /// The DiscoveryCandidate created for this store, when Instagram was found.
+  candidateId     String?        @map("candidate_id")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  @@index([locationId])
+  @@index([status])
+  @@index([instagramHandle])
+  @@map("gis_stores")
 }

@@ -60,6 +60,7 @@ function toDTO(row: DiscoveryCandidate): DiscoveryCandidateDTO {
     seedType: row.seedType,
     seedValue: row.seedValue,
     source: row.source,
+    sourceMeta: (row.sourceMeta as Record<string, unknown> | null) ?? null,
     status: row.status,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

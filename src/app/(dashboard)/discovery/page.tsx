@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { AutoImportPanel } from "@/features/discovery/components/auto-import-panel";
 import { CandidateTable } from "@/features/discovery/components/candidate-table";
-import { DiscoveryForm } from "@/features/discovery/components/discovery-form";
+import { DiscoverySourceTabs } from "@/features/discovery/components/discovery-source-tabs";
 
 export const metadata: Metadata = {
   title: "Discovery",
@@ -15,18 +15,18 @@ export default function DiscoveryPage() {
     <div className="space-y-6">
       <PageHeader
         title="Discovery"
-        description="Find candidate boutique accounts from a profile or hashtag, then queue the good ones."
+        description="Find candidate boutique accounts from a hashtag, a profile, or a 2GIS location, then queue the good ones."
       />
 
       <Card>
         <CardHeader>
           <CardTitle>Discover accounts</CardTitle>
           <CardDescription>
-            Enter one Instagram profile (@handle or URL) or one #hashtag.
+            Search Instagram directly, or start from a physical 2GIS location.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <DiscoveryForm />
+          <DiscoverySourceTabs />
         </CardContent>
       </Card>
 
