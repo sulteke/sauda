@@ -4,7 +4,7 @@ import { Prisma } from "@prisma/client";
 
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { parseGisLocation } from "@/server/discovery/gis/gis-location";
+import { resolveGisLocation } from "@/server/discovery/gis/gis-location";
 import { partitionByRubric } from "@/server/discovery/gis/gis-rubric-filter";
 import type { GisLocation, GisStore, GisStoreSource } from "@/server/discovery/gis/gis-store-source";
 import { resolveGisStoreSources } from "@/server/discovery/gis/resolve-gis-store-source";
@@ -157,7 +157,9 @@ export async function runGisDiscovery(
   input: string,
   options: { limit?: number; locationName?: string | null } = {},
 ): Promise<GisDiscoveryResult> {
-  const location = parseGisLocation(input, options.locationName);
+  // Accepts a bare id, an /inside/ link, a /firm/ link or a go.2gis.com share
+  // link; the last two are resolved to their building before anything is fetched.
+  const location = await resolveGisLocation(input, { name: options.locationName });
   const sources = resolveGisStoreSources();
 
   const { stores, source, usedFallback } = await enumerateStores(

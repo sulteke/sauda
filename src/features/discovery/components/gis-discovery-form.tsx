@@ -87,7 +87,7 @@ export function GisDiscoveryForm() {
           <Input
             value={location}
             onChange={(event) => setLocation(event.target.value)}
-            placeholder="2gis.kz/almaty/inside/9430047375099302 or 9430047375099302"
+            placeholder="go.2gis.com/… share link, 2gis.kz/…/inside/<id>, or a building id"
             className="sm:flex-1"
           />
           <div className="flex items-center gap-2">

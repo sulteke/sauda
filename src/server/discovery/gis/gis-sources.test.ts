@@ -26,6 +26,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Share links and firm URLs are covered in gis-location.test.ts, which exercises
+// the async resolver; these cases need no network.
 describe("parseGisLocation", () => {
   it("accepts a bare building id", () => {
     expect(parseGisLocation("9430047375099302")).toEqual({
@@ -51,12 +53,6 @@ describe("parseGisLocation", () => {
 
   it("accepts an explicit prefix", () => {
     expect(parseGisLocation("place:123456789")).toMatchObject({ kind: "place", id: "123456789" });
-  });
-
-  it("rejects a firm link with guidance — one business is not a venue", () => {
-    expect(() => parseGisLocation("https://2gis.kz/almaty/firm/9429940000817186")).toThrow(
-      /not a venue/i,
-    );
   });
 
   it("rejects junk and empty input", () => {

@@ -54,9 +54,10 @@ export function DiscoverySourceTabs() {
       ) : (
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">
-            Enter a 2GIS venue — a shopping mall or building. Every business inside it is
-            enumerated, filtered to fashion retail, and those with a findable Instagram account
-            become candidates.
+            Enter a 2GIS venue — paste a share link straight from the 2GIS app, a
+            2gis.kz/…/inside/&lt;id&gt; link, or a building id. A link to a single business is
+            resolved to the building it sits in. Every business inside is enumerated, filtered to
+            fashion retail, and those with a findable Instagram account become candidates.
           </p>
           <GisDiscoveryForm />
         </div>
