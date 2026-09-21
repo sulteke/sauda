@@ -131,6 +131,113 @@ describe("2GIS discovery → existing pipeline", () => {
   });
 });
 
+describe("re-running the same venue (idempotency)", () => {
+  /** A candidate this venue produced on an earlier run. */
+  const ourCandidate = {
+    id: "cand-1",
+    handle: "zara_kz",
+    seedType: "GIS_LOCATION",
+    seedValue: APORT_WEST,
+  };
+
+  it("keeps INSTAGRAM_FOUND — a re-run must not relabel our own store KNOWN", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    candFindMany.mockResolvedValue([ourCandidate]);
+
+    const result = await runGisDiscovery(APORT_WEST);
+
+    const data = (storeUpsert.mock.calls[0]?.[0] as { update: Record<string, unknown> }).update;
+    expect(data.status).toBe("INSTAGRAM_FOUND");
+    expect(result.alreadyKnown).toBe(0);
+  });
+
+  it("creates no second candidate and counts it as existing, not new", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    candFindMany.mockResolvedValue([ourCandidate]);
+
+    const result = await runGisDiscovery(APORT_WEST);
+
+    // Upsert on the unique (handle, seedValue) key — one row, refreshed.
+    expect(candUpsert).toHaveBeenCalledTimes(1);
+    expect((candUpsert.mock.calls[0]?.[0] as { where: unknown }).where).toEqual({
+      handle_seedValue: { handle: "zara_kz", seedValue: APORT_WEST },
+    });
+    expect(result).toMatchObject({ newCandidates: 0, existingCandidates: 1, instagramFound: 1 });
+  });
+
+  it("keeps the store linked to the same candidate", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    candFindMany.mockResolvedValue([ourCandidate]);
+    candUpsert.mockResolvedValue({ id: "cand-1" });
+
+    await runGisDiscovery(APORT_WEST);
+
+    const data = (storeUpsert.mock.calls[0]?.[0] as { update: Record<string, unknown> }).update;
+    expect(data.candidateId).toBe("cand-1");
+  });
+
+  it("run 1 then run 2: created once, then re-linked with status preserved", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+
+    // Run 1 — nothing known yet.
+    const first = await runGisDiscovery(APORT_WEST);
+    expect(first).toMatchObject({ newCandidates: 1, existingCandidates: 0 });
+    expect((storeUpsert.mock.calls[0]?.[0] as { create: Record<string, unknown> }).create.status).toBe(
+      "INSTAGRAM_FOUND",
+    );
+
+    // Run 2 — the candidate from run 1 now exists for THIS venue.
+    storeUpsert.mockClear();
+    candUpsert.mockClear();
+    candFindMany.mockResolvedValue([ourCandidate]);
+
+    const second = await runGisDiscovery(APORT_WEST);
+    expect(second).toMatchObject({ newCandidates: 0, existingCandidates: 1 });
+    expect((storeUpsert.mock.calls[0]?.[0] as { update: Record<string, unknown> }).update.status).toBe(
+      "INSTAGRAM_FOUND",
+    );
+  });
+
+  it("a candidate from ANOTHER seed still means KNOWN", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    // Same handle, but discovered through a hashtag — not ours to claim.
+    candFindMany.mockResolvedValue([
+      { id: "c9", handle: "zara_kz", seedType: "HASHTAG", seedValue: "алматыодежда" },
+    ]);
+
+    const result = await runGisDiscovery(APORT_WEST);
+
+    expect(candUpsert).not.toHaveBeenCalled();
+    expect(result.alreadyKnown).toBe(1);
+    expect((storeUpsert.mock.calls[0]?.[0] as { create: Record<string, unknown> }).create.status).toBe(
+      "KNOWN",
+    );
+  });
+
+  it("a candidate from ANOTHER 2GIS venue also means KNOWN", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    candFindMany.mockResolvedValue([
+      { id: "c9", handle: "zara_kz", seedType: "GIS_LOCATION", seedValue: "70030076378089101" },
+    ]);
+
+    const result = await runGisDiscovery(APORT_WEST);
+
+    expect(candUpsert).not.toHaveBeenCalled();
+    expect(result.alreadyKnown).toBe(1);
+  });
+
+  it("an imported boutique outranks our own earlier candidate", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    candFindMany.mockResolvedValue([ourCandidate]);
+    boutiqueFindMany.mockResolvedValue([{ instagramHandle: "zara_kz" }]);
+
+    const result = await runGisDiscovery(APORT_WEST);
+
+    expect(candUpsert).not.toHaveBeenCalled();
+    expect(result.alreadyKnown).toBe(1);
+  });
+});
+
 describe("deduplication", () => {
   it("does not re-create a candidate for an Instagram already a boutique", async () => {
     fetchStores.mockResolvedValue([withIg("zara_kz")]);
@@ -162,10 +269,13 @@ describe("deduplication", () => {
 
     const result = await runGisDiscovery(APORT_WEST);
 
-    expect(candUpsert).toHaveBeenCalledTimes(1);
-    expect(result.newCandidates).toBe(1);
-    // Both storefronts are still recorded.
+    expect(candUpsert).toHaveBeenCalledTimes(2); // same row, upserted twice
+    expect(result).toMatchObject({ newCandidates: 1, existingCandidates: 1 });
+    // Both storefronts are recorded, both linked to the one candidate.
     expect(storeUpsert).toHaveBeenCalledTimes(2);
+    for (const call of storeUpsert.mock.calls) {
+      expect((call[0] as { create: Record<string, unknown> }).create.candidateId).toBe("cand-1");
+    }
   });
 
   it("upserts an existing store by gisId rather than duplicating it", async () => {

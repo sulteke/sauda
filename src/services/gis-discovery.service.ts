@@ -36,8 +36,12 @@ export interface GisDiscoveryResult {
   filteredOut: number;
   /** Relevant stores carrying a reliable Instagram link. */
   instagramFound: number;
-  /** Instagram accounts already known as a boutique or earlier candidate. */
+  /** Instagram accounts already known from ELSEWHERE (a boutique, or a
+   *  candidate found via another seed). These get no new candidate. */
   alreadyKnown: number;
+  /** Candidates this venue had already produced on an earlier run (re-linked,
+   *  never duplicated). */
+  existingCandidates: number;
   /** Relevant stores with no reliable Instagram — kept, never guessed. */
   noInstagram: number;
   /** DiscoveryCandidates newly created by this run. */
@@ -49,13 +53,32 @@ function normalizeHandle(handle: string): string {
   return handle.trim().toLowerCase();
 }
 
+interface KnownHandles {
+  /**
+   * Handles known from ELSEWHERE — an imported boutique, or a candidate found
+   * through a different seed (a hashtag, another venue). These must not get a
+   * second candidate.
+   */
+  foreign: Set<string>;
+  /**
+   * Candidates THIS venue already produced on an earlier run, by handle.
+   *
+   * Keeping these separate is what makes a re-run idempotent without lying: the
+   * store still resolved its own Instagram here, so it stays INSTAGRAM_FOUND
+   * and re-links to the same candidate. Folding them in with `foreign` (the
+   * original bug) relabelled every store KNOWN on the second run and erased
+   * which stores this venue had actually produced.
+   */
+  own: Map<string, string>;
+}
+
 /**
- * Handles already present as a boutique or a discovery candidate. Mirrors the
- * Instagram discovery dedup rule exactly, so a store found via 2GIS can never
- * create a duplicate of an account we already track.
+ * Splits the handles this run found into "already known elsewhere" and
+ * "already ours from a previous run of this same venue".
  */
-async function findKnownHandles(handles: string[]): Promise<Set<string>> {
-  if (handles.length === 0) return new Set();
+async function findKnownHandles(handles: string[], locationId: string): Promise<KnownHandles> {
+  const empty: KnownHandles = { foreign: new Set(), own: new Map() };
+  if (handles.length === 0) return empty;
   const lower = Array.from(new Set(handles.map(normalizeHandle)));
 
   const [boutiques, candidates] = await Promise.all([
@@ -65,16 +88,28 @@ async function findKnownHandles(handles: string[]): Promise<Set<string>> {
     }),
     prisma.discoveryCandidate.findMany({
       where: { handle: { in: lower } },
-      select: { handle: true },
+      select: { id: true, handle: true, seedValue: true, seedType: true },
     }),
   ]);
 
-  const known = new Set<string>();
+  const foreign = new Set<string>();
+  const own = new Map<string, string>();
   for (const boutique of boutiques) {
-    if (boutique.instagramHandle) known.add(normalizeHandle(boutique.instagramHandle));
+    if (boutique.instagramHandle) foreign.add(normalizeHandle(boutique.instagramHandle));
   }
-  for (const candidate of candidates) known.add(normalizeHandle(candidate.handle));
-  return known;
+  for (const candidate of candidates) {
+    const handle = normalizeHandle(candidate.handle);
+    if (candidate.seedType === "GIS_LOCATION" && candidate.seedValue === locationId) {
+      own.set(handle, candidate.id);
+    } else {
+      foreign.add(handle);
+    }
+  }
+  // A boutique always wins: if the account is already imported, this venue's
+  // old candidate is history, not a reason to claim it again.
+  for (const handle of foreign) own.delete(handle);
+
+  return { foreign, own };
 }
 
 /** Enumerates a venue, falling back to Apify only when the primary found no contacts. */
@@ -137,12 +172,14 @@ export async function runGisDiscovery(
 
   const known = await findKnownHandles(
     relevant.map((store) => store.instagramHandle).filter((h): h is string => Boolean(h)),
+    location.id,
   );
 
   let instagramFound = 0;
   let alreadyKnown = 0;
   let noInstagram = 0;
   let newCandidates = 0;
+  let existingCandidates = 0;
 
   for (const store of relevant) {
     const handle = store.instagramHandle ? normalizeHandle(store.instagramHandle) : null;
@@ -152,7 +189,8 @@ export async function runGisDiscovery(
     if (!handle) {
       status = "NO_INSTAGRAM";
       noInstagram += 1;
-    } else if (known.has(handle)) {
+    } else if (known.foreign.has(handle)) {
+      // Known from a boutique or another seed — this venue does not claim it.
       status = "KNOWN";
       instagramFound += 1;
       alreadyKnown += 1;
@@ -169,8 +207,11 @@ export async function runGisDiscovery(
         address: store.address ?? null,
       } satisfies Prisma.InputJsonObject;
 
+      const existingId = known.own.get(handle);
       // Reuses DiscoveryCandidate verbatim, so the existing Auto Import →
       // import queue → analyze → Review Queue → Telegram path is unchanged.
+      // The unique (handle, seedValue) key makes this idempotent: a re-run
+      // refreshes the same row instead of creating a second one.
       const candidate = await prisma.discoveryCandidate.upsert({
         where: { handle_seedValue: { handle, seedValue: location.id } },
         update: { sourceMeta, instagramUrl: store.instagramUrl ?? "" },
@@ -184,10 +225,14 @@ export async function runGisDiscovery(
         },
       });
       candidateId = candidate.id;
-      newCandidates += 1;
+
+      if (existingId) existingCandidates += 1;
+      else newCandidates += 1;
+
       // Within one run the same account can appear twice (two outlets of one
-      // brand); treat it as known from here on so it is counted once.
-      known.add(handle);
+      // brand). Record it as ours so the second storefront re-links to the same
+      // candidate and is counted as existing, not as a new one.
+      known.own.set(handle, candidate.id);
     }
 
     // gis_id is the cross-run key: a re-run enriches rather than duplicates.
@@ -242,6 +287,7 @@ export async function runGisDiscovery(
     filteredOut: excluded.length,
     instagramFound,
     alreadyKnown,
+    existingCandidates,
     noInstagram,
     newCandidates,
   };
