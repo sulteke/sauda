@@ -2,6 +2,7 @@ import "server-only";
 
 import { logger } from "@/lib/logger";
 
+import { FASHION_QUERIES } from "./gis-rubric-filter";
 import {
   extractInstagramHandle,
   type GisFetchOptions,
@@ -40,15 +41,22 @@ interface ApifyGisItem {
   title?: string;
   address?: string;
   fullAddress?: string;
-  phone?: string;
+  // Contacts arrive as ARRAYS from the verified actor (phoneText, website),
+  // while other actors use plain strings — both shapes are accepted.
+  phone?: unknown;
   phones?: unknown;
-  website?: string;
+  phoneText?: unknown;
+  phoneValue?: unknown;
+  website?: unknown;
+  site?: unknown;
   url?: string;
-  site?: string;
   instagram?: string;
   socialLinks?: unknown;
   socials?: unknown;
   contacts?: unknown;
+  // Human-readable categories. `category` is an INTERNAL code on the verified
+  // actor ("common_store"), so it is never used for the fashion decision.
+  rubrics?: unknown;
   rubric?: string;
   category?: string;
   categories?: unknown;
@@ -56,13 +64,40 @@ interface ApifyGisItem {
   longitude?: number;
   lat?: number;
   lon?: number;
+  location?: { lat?: number; lng?: number; lon?: number };
   gisUrl?: string;
   link?: string;
 }
 
+/**
+ * First usable string among the candidates, flattening one level of array.
+ * The verified actor returns `website: ["http://kimex.kz"]` and
+ * `phoneText: ["+7...", "+7..."]`, so a string-only reader silently dropped
+ * every contact it had.
+ */
 function firstString(...values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      const found = value.find((v) => typeof v === "string" && v.trim());
+      if (typeof found === "string") return found.trim();
+    }
+  }
+  return null;
+}
+
+/** Every string in a value that may be a string or an array of strings. */
+function stringList(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  }
+  return [];
+}
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return null;
 }
@@ -121,15 +156,15 @@ export class GisApifyStoreSource implements GisStoreSource {
     if (!gisId || !name) return null;
 
     // Scan every social/contact field for a real instagram.com URL rather than
-    // trusting one field name — actors disagree on where they put it.
+    // trusting one field name — actors disagree on where they put it. The
+    // verified actor files it under socials.other[], beside VK and Telegram.
     const candidates = [
       item.instagram,
-      ...deepStrings(item.socialLinks),
       ...deepStrings(item.socials),
+      ...deepStrings(item.socialLinks),
       ...deepStrings(item.contacts),
-      item.website,
-      item.url,
-      item.site,
+      ...stringList(item.website),
+      ...stringList(item.site),
     ];
     let handle: string | null = null;
     for (const candidate of candidates) {
@@ -137,24 +172,65 @@ export class GisApifyStoreSource implements GisStoreSource {
       if (handle) break;
     }
 
-    const website = firstString(item.website, item.site, item.url);
+    // The store's OWN site only. `item.url` is the 2GIS listing page, which is
+    // provenance, not a website — filing it here would mask a missing one.
+    const website = [...stringList(item.website), ...stringList(item.site)].find(
+      (value) => !/instagram\.com/i.test(value) && !/2gis\./i.test(value),
+    );
+
+    // Human-readable categories, primary first. `category` holds an internal
+    // code on the verified actor, so it is only a last-resort fallback.
+    const rubrics = [
+      ...stringList(item.rubrics),
+      ...stringList(item.rubric),
+      ...stringList(item.categories),
+    ];
 
     return {
       gisId,
       name,
       address: firstString(item.fullAddress, item.address),
-      phone: firstString(item.phone, ...deepStrings(item.phones)),
-      // Never file an Instagram URL as the website.
-      website: website && !/instagram\.com/i.test(website) ? website : null,
+      phone: firstString(item.phoneText, item.phoneValue, item.phone, item.phones),
+      website: website ?? null,
       instagramHandle: handle,
       instagramUrl: handle ? instagramUrlFor(handle) : null,
-      rubric: firstString(item.rubric, item.category, ...deepStrings(item.categories)),
-      latitude: typeof item.latitude === "number" ? item.latitude : (item.lat ?? null),
-      longitude: typeof item.longitude === "number" ? item.longitude : (item.lon ?? null),
+      rubric: rubrics[0] ?? firstString(item.category),
+      rubrics: rubrics.length > 0 ? rubrics : null,
+      latitude: firstNumber(item.location?.lat, item.latitude, item.lat),
+      longitude: firstNumber(item.location?.lng, item.location?.lon, item.longitude, item.lon),
       locationId: location.id,
       locationName: location.name ?? null,
-      gisUrl: firstString(item.gisUrl, item.link) ?? `https://2gis.kz/firm/${gisId}`,
+      gisUrl: firstString(item.gisUrl, item.link, item.url) ?? `https://2gis.kz/firm/${gisId}`,
     };
+  }
+
+  /**
+   * The input property names this actor accepts.
+   *
+   * Actors validate strictly — the verified one rejects the whole run with
+   * "Property input.startUrls is not allowed" — so a blind union of field names
+   * cannot work. Reading the actor's own schema keeps the union approach (and
+   * therefore actor swappability) while sending only what it will accept.
+   * A schema we cannot read is not fatal: we fall back to sending everything.
+   */
+  private async allowedInputKeys(): Promise<Set<string> | null> {
+    try {
+      const actor = await fetch(
+        `${this.baseUrl}/v2/acts/${this.actorId}?token=${this.token}`,
+      ).then((r) => (r.ok ? r.json() : null));
+      const buildId = actor?.data?.taggedBuilds?.latest?.buildId;
+      if (!buildId) return null;
+      const build = await fetch(
+        `${this.baseUrl}/v2/actor-builds/${buildId}?token=${this.token}`,
+      ).then((r) => (r.ok ? r.json() : null));
+      const raw = build?.data?.inputSchema;
+      if (!raw) return null;
+      const schema = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const keys = Object.keys(schema?.properties ?? {});
+      return keys.length > 0 ? new Set(keys) : null;
+    } catch {
+      return null; // never let schema discovery break a run
+    }
   }
 
   async fetchStores(location: GisLocation, options: GisFetchOptions = {}): Promise<GisStore[]> {
@@ -164,16 +240,35 @@ export class GisApifyStoreSource implements GisStoreSource {
         ? `https://2gis.kz/almaty/inside/${location.id}`
         : `https://2gis.kz/almaty/geo/${location.id}`;
 
-    // Union input: actors read the names they know and ignore the rest, so the
-    // actor stays swappable via APIFY_2GIS_ACTOR without touching this code.
-    const input: Record<string, unknown> = {
+    // Search terms partition the venue the same way the official source does.
+    const queries = FASHION_QUERIES.filter(Boolean);
+    // maxItems is PER QUERY on the verified actor, and it bills per result, so
+    // the cap is divided across queries to keep a bounded run genuinely bounded.
+    const perQuery = limit ? Math.max(1, Math.ceil(limit / queries.length)) : undefined;
+
+    const union: Record<string, unknown> = {
+      // Venue, by whichever name the actor uses.
+      buildingIds: [location.id],
+      buildingId: location.id,
+      locationId: location.id,
       startUrls: [{ url: gisUrl }],
       urls: [gisUrl],
       url: gisUrl,
-      buildingId: location.id,
-      locationId: location.id,
-      ...(limit ? { maxItems: limit, maxResults: limit, resultsLimit: limit } : {}),
+      // What to look for, and where.
+      query: queries,
+      domain: process.env.GIS_APIFY_DOMAIN ?? "2gis.kz",
+      language: process.env.GIS_APIFY_LANGUAGE ?? "ru",
+      // Contacts are the whole point of this source: it opens each org page to
+      // collect website and social links, which the official API gates behind
+      // a paid add-on.
+      includeContacts: true,
+      ...(perQuery ? { maxItems: perQuery, maxResults: perQuery, resultsLimit: perQuery } : {}),
     };
+
+    const allowed = await this.allowedInputKeys();
+    const input = allowed
+      ? Object.fromEntries(Object.entries(union).filter(([key]) => allowed.has(key)))
+      : union;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -200,6 +295,7 @@ export class GisApifyStoreSource implements GisStoreSource {
       const seen = new Set<string>();
       for (const item of Array.isArray(items) ? items : []) {
         const store = this.toStore(item, location);
+        // Queries overlap, so the same store commonly appears more than once.
         if (!store || seen.has(store.gisId)) continue;
         seen.add(store.gisId);
         stores.push(store);
@@ -210,6 +306,9 @@ export class GisApifyStoreSource implements GisStoreSource {
         source: this.name,
         actorId: this.actorId,
         locationId: location.id,
+        queries: queries.length,
+        maxItemsPerQuery: perQuery ?? null,
+        inputFiltered: Boolean(allowed),
         returned: Array.isArray(items) ? items.length : 0,
         stores: stores.length,
         withInstagram: stores.filter((store) => store.instagramHandle).length,

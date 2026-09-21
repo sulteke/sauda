@@ -244,6 +244,9 @@ export class GisApiStoreSource implements GisStoreSource {
       instagramHandle: handle,
       instagramUrl: handle ? instagramUrlFor(handle) : null,
       rubric: item.rubrics?.[0]?.name ?? null,
+      rubrics: (item.rubrics ?? [])
+        .map((r) => r.name)
+        .filter((n): n is string => typeof n === "string" && n.length > 0),
       latitude: item.point?.lat ?? null,
       longitude: item.point?.lon ?? null,
       locationId: location.id,

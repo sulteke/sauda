@@ -79,14 +79,38 @@ export function isFashionRubric(rubric: string | null | undefined): boolean {
   return FASHION_RUBRICS.some((term) => value.includes(term));
 }
 
+/** A store as the filter sees it: its primary rubric, plus the full list. */
+export interface RubricBearing {
+  rubric?: string | null;
+  rubrics?: readonly string[] | null;
+}
+
+/**
+ * Judges a store by its PRIMARY rubric only.
+ *
+ * 2GIS lists several rubrics per store and the first is its identity, while the
+ * rest are things it merely also stocks. Accepting any match would pull in a
+ * supermarket that sells socks or a cosmetics shop with a hosiery shelf — real
+ * examples from Aport Mall West — none of which are boutiques. Judging the
+ * primary keeps "Reserved" and "Kimex" while rejecting "Magnum" and "Диона".
+ *
+ * The trade-off is a boutique filed under an unusual primary rubric being
+ * missed; widening this later is a one-line change, whereas a wrongly-included
+ * store costs real AI budget downstream.
+ */
+export function isFashionStore(store: RubricBearing): boolean {
+  const primary = store.rubrics?.[0] ?? store.rubric ?? null;
+  return isFashionRubric(primary);
+}
+
 /** Splits stores into the fashion-relevant ones and the rest. */
-export function partitionByRubric<T extends { rubric?: string | null }>(
+export function partitionByRubric<T extends RubricBearing>(
   stores: T[],
 ): { relevant: T[]; excluded: T[] } {
   const relevant: T[] = [];
   const excluded: T[] = [];
   for (const store of stores) {
-    (isFashionRubric(store.rubric) ? relevant : excluded).push(store);
+    (isFashionStore(store) ? relevant : excluded).push(store);
   }
   return { relevant, excluded };
 }

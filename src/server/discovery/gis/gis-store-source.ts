@@ -27,8 +27,11 @@ export interface GisStore {
   /** Only ever a link the source actually published — never a guess. */
   instagramUrl?: string | null;
   instagramHandle?: string | null;
-  /** Category as 2GIS labels it, e.g. "Магазин одежды". */
+  /** Primary category as 2GIS labels it, e.g. "Женская одежда". This is the
+   *  one the fashion filter judges; it is the store's identity in 2GIS. */
   rubric?: string | null;
+  /** Every category 2GIS lists, primary first. Kept for review and auditing. */
+  rubrics?: readonly string[] | null;
   latitude?: number | null;
   longitude?: number | null;
   locationId?: string | null;
