@@ -8,14 +8,21 @@ import { prisma } from "@/lib/prisma";
 /**
  * The per-business-day AI budget — the SINGLE place the analysis limit is
  * decided. Every path that can invoke the model (the import queue's Analyze
- * stage, Auto Import, Process All, and the manual single-import flow) goes
- * through {@link reserveAiInvocation}, so there is exactly one rule and one
- * counter rather than a check per entry point.
+ * stage, Auto Import, Process All, and the manual single-import flow) uses the
+ * same two steps: {@link assertAiInvocationAllowed} before the call, and
+ * {@link recordSuccessfulAnalysis} after it SUCCEEDS. So there is one rule and
+ * one counter rather than a check per entry point.
  *
- * The counter is `ImportJob.analyzedAt`, stamped at the moment a request is
- * issued — before its outcome is known — because a failed request still
- * consumed the provider's daily quota. Undercounting there is precisely the
- * case this budget exists to contain.
+ * The counter is `ImportJob.analyzedAt`, stamped only once the model returned a
+ * usable result. A transient failure (a 503 blip, a timeout, a 429) therefore
+ * costs NO daily slot: the day's allowance is spent on analyses that actually
+ * produced something, not on requests that errored out.
+ *
+ * (This reverses the earlier "count every invocation" rule. That rule was meant
+ * to protect the provider's free-tier quota, but it never tracked it accurately
+ * — retries make one invocation several HTTP requests — and in practice it let
+ * a flaky provider burn the whole day's budget on failures. Counting successes
+ * keeps the limit tied to the thing it exists to ration: finished analyses.)
  *
  * This is deliberately separate from the Telegram publication limit: one caps
  * AI spend, the other caps how much is posted, and neither constrains the other.
@@ -28,7 +35,7 @@ export class DailyAnalysisLimitError extends Error {
 
   constructor(used: number, limit: number) {
     super(
-      `Daily analysis limit reached (${used}/${limit} AI requests used today). ` +
+      `Daily analysis limit reached (${used}/${limit} successful analyses today). ` +
         `Remaining work resumes on the next business day.`,
     );
     this.name = "DailyAnalysisLimitError";
@@ -37,9 +44,24 @@ export class DailyAnalysisLimitError extends Error {
   }
 }
 
-/** AI calls issued so far in the current business day (Asia/Almaty by default). */
-export async function countAnalysesToday(now: Date = new Date()): Promise<number> {
-  return prisma.importJob.count({ where: { analyzedAt: { gte: startOfBusinessDay(now) } } });
+/**
+ * Successful analyses so far in the current business day (Asia/Almaty default).
+ *
+ * With `providerId`, counts only the ones that provider produced. Each provider
+ * draws on its own Google Cloud project, so their quotas are genuinely separate
+ * and must never be pooled into one number. Without it, counts every provider —
+ * used for reporting, not for gating.
+ */
+export async function countAnalysesToday(
+  now: Date = new Date(),
+  providerId?: string,
+): Promise<number> {
+  return prisma.importJob.count({
+    where: {
+      analyzedAt: { gte: startOfBusinessDay(now) },
+      ...(providerId ? { analyzedBy: providerId } : {}),
+    },
+  });
 }
 
 export interface AnalysisBudget {
@@ -77,16 +99,25 @@ export async function assertAiInvocationAllowed(
 }
 
 /**
- * Claims one AI request for `jobId`: refuses when the allowance is spent,
- * otherwise records the invocation so it counts from this moment on.
+ * Records that `jobId` was analyzed SUCCESSFULLY — stamps `analyzedAt`, which
+ * is what the daily counter reads.
  *
- * Call this IMMEDIATELY before handing the request to the provider. Stamping
- * first is what makes a failed call count, and re-checking here (rather than
- * trusting an earlier {@link assertAiInvocationAllowed}) closes the window
- * between an early check and the actual call.
+ * Call this AFTER the model returned a usable result, never before: that is the
+ * whole point of the budget change. A run that failed (throwing, or degrading
+ * to keyword-only for a disabled provider) must not reach this, so its slot
+ * stays available. The disabled provider issues no request and produces no AI
+ * analysis, so it is never recorded.
  */
-export async function reserveAiInvocation(jobId: string, providerName: string): Promise<void> {
+export async function recordSuccessfulAnalysis(
+  jobId: string,
+  providerName: string,
+  providerId?: string,
+): Promise<void> {
   if (providerName === "disabled") return;
-  await assertAiInvocationAllowed(providerName, { jobId });
-  await prisma.importJob.update({ where: { id: jobId }, data: { analyzedAt: new Date() } });
+  await prisma.importJob.update({
+    where: { id: jobId },
+    // Written together, always: a slot only exists because some provider
+    // produced it, so attributing it is part of recording it.
+    data: { analyzedAt: new Date(), analyzedBy: providerId ?? providerName },
+  });
 }

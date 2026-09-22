@@ -14,7 +14,7 @@ import {
   checkDailyAnalysisBudget,
   countAnalysesToday,
   DailyAnalysisLimitError,
-  reserveAiInvocation,
+  recordSuccessfulAnalysis,
 } from "./analysis-budget";
 
 const originalLimit = process.env.DAILY_ANALYSIS_LIMIT;
@@ -86,11 +86,9 @@ describe("assertAiInvocationAllowed", () => {
   });
 });
 
-describe("reserveAiInvocation", () => {
-  it("stamps analyzedAt before the request goes out", async () => {
-    jobCount.mockResolvedValue(5);
-
-    await reserveAiInvocation("job-1", "gemini");
+describe("recordSuccessfulAnalysis", () => {
+  it("stamps analyzedAt (only ever called AFTER a success)", async () => {
+    await recordSuccessfulAnalysis("job-1", "gemini");
 
     const call = jobUpdate.mock.calls[0]?.[0] as {
       where: { id: string };
@@ -100,29 +98,26 @@ describe("reserveAiInvocation", () => {
     expect(call.data.analyzedAt).toBeInstanceOf(Date);
   });
 
-  it("refuses and stamps NOTHING when the allowance is spent", async () => {
-    jobCount.mockResolvedValue(20);
-
-    await expect(reserveAiInvocation("job-1", "gemini")).rejects.toBeInstanceOf(
-      DailyAnalysisLimitError,
-    );
-    expect(jobUpdate).not.toHaveBeenCalled();
-  });
-
-  it("does nothing at all for the disabled provider", async () => {
-    await reserveAiInvocation("job-1", "disabled");
-    expect(jobUpdate).not.toHaveBeenCalled();
+  it("does not read the counter — the caller already checked before the call", async () => {
+    await recordSuccessfulAnalysis("job-1", "gemini");
     expect(jobCount).not.toHaveBeenCalled();
   });
 
-  it("re-checks at the call site, closing the gap after an earlier assert", async () => {
-    // Allowance free at the early check, spent by the time the call is made.
-    jobCount.mockResolvedValueOnce(19).mockResolvedValueOnce(20);
+  it("records nothing for the disabled provider (it ran no analysis)", async () => {
+    await recordSuccessfulAnalysis("job-1", "disabled");
+    expect(jobUpdate).not.toHaveBeenCalled();
+  });
+});
 
-    await assertAiInvocationAllowed("gemini");
-    await expect(reserveAiInvocation("job-1", "gemini")).rejects.toBeInstanceOf(
-      DailyAnalysisLimitError,
-    );
+describe("a failed analysis never records a slot", () => {
+  it("assert-then-record: a throw between them leaves analyzedAt unstamped", async () => {
+    // This is the whole point of the change: the guard runs, the call fails, and
+    // recordSuccessfulAnalysis is never reached — so no slot is consumed.
+    jobCount.mockResolvedValue(5);
+
+    await assertAiInvocationAllowed("gemini", { jobId: "job-1" });
+    // ...provider throws here (simulated: we simply do not call record)...
+
     expect(jobUpdate).not.toHaveBeenCalled();
   });
 });

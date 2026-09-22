@@ -171,11 +171,15 @@ model ImportJob {
   /// Failure reason when status = FAILED.
   error      String?
   attempts   Int          @default(0)
-  /// When an AI (Gemini) call was actually issued for this job. Stamped at the
-  /// moment of invocation — BEFORE the response is known — so a failed request
-  /// still counts, because it still consumed the provider's daily quota. This
-  /// is the ONLY source of truth for the per-business-day analysis limit.
+  /// When this job was analyzed SUCCESSFULLY. Stamped only once the model
+  /// returned a usable result, so a transient failure (503/429/timeout) costs
+  /// no daily slot. Source of truth for the per-business-day analysis limit.
   analyzedAt DateTime?    @map("analyzed_at")
+  /// Which AI provider produced that successful analysis ("primary" /
+  /// "fallback"). Set together with `analyzedAt`, never on its own, so the
+  /// daily budget can be counted PER PROVIDER — each one draws on a separate
+  /// Google Cloud project with its own quota.
+  analyzedBy String?      @map("analyzed_by")
   /// Supabase user id of the admin who ran the import.
   createdBy  String?      @map("created_by")
 
@@ -335,4 +339,27 @@ model GisStore {
   @@index([status])
   @@index([instagramHandle])
   @@map("gis_stores")
+}
+
+/// Transient health of one AI provider, shared across serverless invocations.
+///
+/// A 429 means the provider's real quota is gone; a 503/timeout means it is
+/// struggling. Either way the next boutique should skip it rather than spend
+/// another request discovering the same thing. Module-level memory cannot hold
+/// that: every process-next is its own invocation, possibly on a fresh
+/// instance, so the cooldown lives here.
+///
+/// One row per provider id ("primary" / "fallback"). Absent row = healthy.
+model AiProviderCooldown {
+  /// Stable provider id — "primary" or "fallback".
+  provider      String    @id
+  /// Skip this provider until this moment. Null / past = available again.
+  cooldownUntil DateTime? @map("cooldown_until")
+  /// HTTP status that triggered the cooldown (429, 503, …). Null for timeouts.
+  lastStatus    Int?      @map("last_status")
+  /// Why it was put in cooldown, for diagnosis.
+  lastError     String?   @map("last_error")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@map("ai_provider_cooldowns")
 }

@@ -5,7 +5,8 @@ import type { ImportQueue } from "@prisma/client";
 import { minFollowersForAnalysis } from "@/config/limits";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { checkDailyAnalysisBudget, countAnalysesToday } from "@/server/ai/analysis-budget";
+import { countAnalysesToday } from "@/server/ai/analysis-budget";
+import { anyProviderAvailable } from "@/server/ai/ai-provider-pool";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
 import { analyzeImportJob, parseInstagramProfile } from "@/services/import.service";
 import type { ImportQueueItemDTO } from "@/types";
@@ -217,7 +218,7 @@ export async function processNextImport(): Promise<ProcessResult> {
     orderBy: { createdAt: "asc" },
   });
   if (parseRow) {
-    const budget = await checkDailyAnalysisBudget();
+    const budget = await analysisBudgetSnapshot();
     if (budget.reached) {
       const remaining = await countRemaining();
       logger.info("queue.daily_limit_reached", {
@@ -291,6 +292,27 @@ async function runParseStage(id: string, instagramUrl: string): Promise<ProcessR
  * failed item), it does not decide the limit.
  */
 export { countAnalysesToday };
+
+/**
+ * Whether ANY AI project can still run today, plus the numbers to report.
+ *
+ * Gating is per provider — each key lives in its own Google Cloud project with
+ * its own quota — so "reached" means every project is spent or cooling down,
+ * not that some pooled total ran out. The summed `used`/`limit` are for display
+ * only; nothing decides anything from them.
+ */
+async function analysisBudgetSnapshot(): Promise<{
+  reached: boolean;
+  used: number;
+  limit: number;
+}> {
+  const { available, usage } = await anyProviderAvailable();
+  return {
+    reached: !available,
+    used: usage.reduce((sum, u) => sum + u.used, 0),
+    limit: usage.reduce((sum, u) => sum + u.limit, 0),
+  };
+}
 
 /**
  * Reads the follower count from an already-parsed profile.
@@ -372,7 +394,7 @@ async function runAnalyzeStage(
   // Gate 2 — daily allowance, read from the shared AI budget. The pipeline
   // enforces the same budget again at the call site; asking here first is what
   // turns a refusal into a clean stop instead of a spurious ANALYSIS_FAILED.
-  const budget = await checkDailyAnalysisBudget();
+  const budget = await analysisBudgetSnapshot();
   if (budget.reached) {
     const remaining = await countRemaining();
     logger.info("queue.daily_limit_reached", {

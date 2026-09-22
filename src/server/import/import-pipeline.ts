@@ -15,8 +15,8 @@ import { completeHashtags } from "@/lib/hashtag-derivation";
 import { resolveLocation } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { assertAiInvocationAllowed, reserveAiInvocation } from "@/server/ai/analysis-budget";
-import { resolveAiCategoryProvider } from "@/server/ai/gemini-category-provider";
+import { recordSuccessfulAnalysis } from "@/server/ai/analysis-budget";
+import { assertProviderAvailable, resolvePooledProvider } from "@/server/ai/ai-provider-pool";
 import type { BoutiqueEnrichment, BoutiquePreview, ImportJobDTO } from "@/types";
 import { slugify } from "@/utils/format";
 
@@ -138,8 +138,11 @@ export function toImportJobDTO(job: ImportJob): ImportJobDTO {
  * credit and leave no half-finished row behind.
  */
 export async function runDiscovery(jobId: string): Promise<ImportJob> {
-  const aiProvider = resolveAiCategoryProvider();
-  await assertAiInvocationAllowed(aiProvider.name, { jobId, path: "manual-import" });
+  // Pool-backed: primary project first, fallback project on a transient
+  // failure. The availability check runs BEFORE the job is touched or the
+  // profile scraped, so a refused import costs no Apify credit.
+  const aiProvider = resolvePooledProvider({ context: { jobId, path: "manual-import" } });
+  await assertProviderAvailable({ jobId, path: "manual-import" });
 
   await prisma.importJob.update({
     where: { id: jobId },
@@ -164,8 +167,11 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
       externalUrls: profile.externalUrls,
       businessAddress: profile.businessAddress,
     });
-    await reserveAiInvocation(jobId, aiProvider.name);
+    // The pool throws when every project is out of budget or cooling down, and
+    // when a provider fails permanently; reaching the next line means some
+    // project produced the analysis, so the slot is recorded against it.
     const detection = await runHybridDetection(detectionInput, { aiProvider, enrichment });
+    await recordSuccessfulAnalysis(jobId, aiProvider.name, aiProvider.lastProviderId ?? undefined);
     const preview = mapProfileToPreview(
       profile,
       detection,
@@ -420,14 +426,17 @@ export async function runAnalyze(jobId: string): Promise<{ job: ImportJob; bouti
       externalUrls: rawProfile.externalUrls,
       businessAddress: rawProfile.businessAddress,
     });
-    // Real AI provider in STRICT mode: a terminal Gemini failure throws so the
-    // queue marks ANALYSIS_FAILED instead of silently degrading to keyword-only.
-    const aiProvider = resolveAiCategoryProvider({ throwOnFailure: true });
-    await reserveAiInvocation(jobId, aiProvider.name);
+    // Pool-backed and STRICT: a transient failure on the primary project fails
+    // over to the fallback project, and only a failure of BOTH throws — which
+    // the queue turns into a retryable ANALYSIS_FAILED. Because a failure
+    // throws, the recording line below is reached only on a genuine success, so
+    // a 503/429/timeout never consumes a daily slot.
+    const aiProvider = resolvePooledProvider({ context: { jobId, path: "queue-analyze" } });
     const detection = await runHybridDetection(toDetectionInput(rawProfile), {
       aiProvider,
       enrichment,
     });
+    await recordSuccessfulAnalysis(jobId, aiProvider.name, aiProvider.lastProviderId ?? undefined);
     const preview = mapProfileToPreview(
       rawProfile,
       detection,

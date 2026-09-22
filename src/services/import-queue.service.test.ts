@@ -32,6 +32,11 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/services/import.service", () => ({ parseInstagramProfile, analyzeImportJob }));
 
+// Provider availability is the pool's job and is covered in its own test file;
+// here it is a dial, so the queue's reaction to "no capacity" can be exercised.
+const { anyProviderAvailable } = vi.hoisted(() => ({ anyProviderAvailable: vi.fn() }));
+vi.mock("@/server/ai/ai-provider-pool", () => ({ anyProviderAvailable }));
+
 import {
   clearQueue,
   deleteQueueItem,
@@ -64,6 +69,10 @@ function resetAll() {
   // Default parsed profile clears the quality gate; no AI calls used today.
   jobFindUnique.mockResolvedValue({ rawProfile: { followersCount: 50_000 } });
   jobCount.mockResolvedValue(0);
+  anyProviderAvailable.mockResolvedValue({
+    available: true,
+    usage: [{ id: "primary", projectId: "proj-a", used: 0, limit: 20, cooldownUntil: null, available: true }],
+  });
   update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
     Promise.resolve({
       id: "row",
@@ -319,6 +328,17 @@ describe("follower quality gate", () => {
   });
 });
 
+/** Every project spent / cooling down — the pool reports no capacity. */
+function exhaustAllProviders() {
+  anyProviderAvailable.mockResolvedValue({
+    available: false,
+    usage: [
+      { id: "primary", projectId: "proj-a", used: 20, limit: 20, cooldownUntil: null, available: false },
+      { id: "fallback", projectId: "proj-b", used: 20, limit: 20, cooldownUntil: null, available: false },
+    ],
+  });
+}
+
 describe("daily analysis limit", () => {
   beforeEach(() => {
     resetAll();
@@ -340,7 +360,7 @@ describe("daily analysis limit", () => {
 
   it("blocks the 21st AI call and leaves the item untouched for the next day", async () => {
     pendingAnalysisWith(50_000);
-    jobCount.mockResolvedValue(20);
+    exhaustAllProviders();
 
     const result = await processNextImport();
 
@@ -350,23 +370,20 @@ describe("daily analysis limit", () => {
     expect(result).toMatchObject({ processed: false, item: null, dailyLimitReached: true });
   });
 
-  it("counts every AI invocation, including one that failed", async () => {
-    // analyzedAt is stamped at invocation time, so the count query is the only
-    // thing the limit consults — a failed call is already included in it.
+  it("stops when every provider is out of capacity", async () => {
     pendingAnalysisWith(50_000);
-    jobCount.mockResolvedValue(20);
+    exhaustAllProviders();
 
-    await processNextImport();
+    const result = await processNextImport();
 
-    expect(jobCount).toHaveBeenCalledWith({
-      where: { analyzedAt: { gte: expect.any(Date) } },
-    });
+    expect(anyProviderAvailable).toHaveBeenCalled();
     expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(result.dailyLimitReached).toBe(true);
   });
 
   it("low-follower accounts consume no slot: they are still skipped at the limit", async () => {
     pendingAnalysisWith(1_200);
-    jobCount.mockResolvedValue(20);
+    exhaustAllProviders();
 
     const result = await processNextImport();
 
@@ -383,7 +400,7 @@ describe("daily analysis limit", () => {
     findFirst
       .mockResolvedValueOnce(null) // no pending analysis
       .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
-    jobCount.mockResolvedValue(20);
+    exhaustAllProviders();
 
     const result = await processNextImport();
 

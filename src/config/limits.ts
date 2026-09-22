@@ -45,3 +45,39 @@ export function dailyTelegramPublishLimit(): number {
     DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT,
   );
 }
+
+// --- AI providers ------------------------------------------------------------
+//
+// Gemini's rate limits apply per Google Cloud PROJECT, not per API key, so two
+// keys only add capacity when they belong to two different projects. Each
+// provider therefore carries its OWN daily limit: there is no global "40/day"
+// anywhere, because the real ceiling is whatever each project's RPD happens to
+// be, and the two need not match.
+
+export const DEFAULT_PROVIDER_DAILY_LIMIT = 20;
+export const DEFAULT_PROVIDER_COOLDOWN_MINUTES = 10;
+
+/** Successful analyses per business day allowed on the PRIMARY project. */
+export function geminiPrimaryDailyLimit(): number {
+  return positiveInt(process.env.GEMINI_PRIMARY_DAILY_LIMIT, DEFAULT_PROVIDER_DAILY_LIMIT);
+}
+
+/** Successful analyses per business day allowed on the FALLBACK project. */
+export function geminiFallbackDailyLimit(): number {
+  return positiveInt(process.env.GEMINI_FALLBACK_DAILY_LIMIT, DEFAULT_PROVIDER_DAILY_LIMIT);
+}
+
+/**
+ * How long a provider is skipped after a 429 / 503 / timeout / network error.
+ *
+ * Long enough that the next few boutiques do not re-discover the same outage,
+ * short enough that a brief blip does not sideline a healthy project for the
+ * rest of the day. Override: GEMINI_PROVIDER_COOLDOWN_MINUTES.
+ */
+export function providerCooldownMs(): number {
+  const minutes = positiveInt(
+    process.env.GEMINI_PROVIDER_COOLDOWN_MINUTES,
+    DEFAULT_PROVIDER_COOLDOWN_MINUTES,
+  );
+  return minutes * 60_000;
+}
