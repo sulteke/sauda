@@ -27,9 +27,10 @@ import {
 
 /**
  * The pool's whole job is deciding WHICH Google Cloud project runs and what to
- * do when one fails. Every case below is a failure mode seen in production:
- * a 429 when a project's daily quota is gone, a 503 when Gemini is overloaded,
- * a timeout, and a 400/403 that no second project would survive either.
+ * do when one fails. Every case below is a failure mode seen in production: a
+ * 429 when a project's daily quota is gone, a 503 when Gemini is overloaded, a
+ * timeout, a 403 from a project Google has restricted pending billing, and a
+ * 400 that no second project would survive either.
  */
 
 const ENV = [
@@ -217,12 +218,35 @@ describe("failover between projects", () => {
     expect(cooldownUpsert).not.toHaveBeenCalled(); // not the project's fault
   });
 
-  it("A 403 → B is NOT called (a rejected key fails everywhere)", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(httpError(403));
+  it("A 403 → B IS called: a restricted project says nothing about the other", async () => {
+    // Regression: a fallback project in Google's "set up billing" restricted
+    // state answered 403, and treating that as permanent aborted analyses the
+    // healthy project could have finished.
+    const fetchMock = vi.fn().mockResolvedValueOnce(httpError(403)).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "B"]);
+    // The rejected project is parked so the next boutique skips it.
+    expect(cooldownUpsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("A 401 → B IS called: a rejected key is that key's problem alone", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(httpError(401)).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect((await analyzeWithPool(request())).providerId).toBe(FALLBACK_PROVIDER_ID);
+  });
+
+  it("A 404 → B is NOT called (the model name is wrong everywhere)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(httpError(404));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cooldownUpsert).not.toHaveBeenCalled(); // not the project's fault
   });
 
   it("A 429 + B 429 → the analysis fails (queue turns it into ANALYSIS_FAILED)", async () => {

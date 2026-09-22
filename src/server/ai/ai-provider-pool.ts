@@ -28,12 +28,19 @@ import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-
  * providers as independent projects: each has its own daily budget, its own
  * cooldown, and its own counter. Nothing here pools them into a single number.
  *
- * Failure handling is deliberately asymmetric:
- *   - transient (429 / 503 / 5xx / timeout / network) → this project is unwell,
- *     park it in cooldown and try the NEXT one;
- *   - permanent (400 / 403) → the request or the key is wrong, and the next
- *     project would fail identically, so fail immediately instead of burning a
- *     second project's quota proving it.
+ * Failure handling is deliberately asymmetric, and the line is drawn around
+ * WHOSE fault it is:
+ *   - the REQUEST is malformed (400) or names a model that does not exist
+ *     (404) → the next project would fail identically, so fail immediately
+ *     rather than burn a second quota proving it;
+ *   - anything else — quota (429), outage (5xx), timeout, network, and
+ *     crucially a rejected or restricted key (401 / 403) → belongs to THIS
+ *     project alone. Park it in cooldown and try the next one.
+ *
+ * That 401/403 line was learned the hard way: a fallback project sitting in
+ * Google's "API access is restricted, set up billing" state answered 403, and
+ * treating that as permanent aborted analyses the healthy project could have
+ * completed. A rejected credential says nothing about the other project's.
  *
  * Budget: each provider is called AT MOST ONCE per boutique, with the
  * provider's own retry disabled (maxAttempts = 1). A→B, never A→B→A. Two
@@ -46,10 +53,15 @@ import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-
 export const PRIMARY_PROVIDER_ID = "primary";
 export const FALLBACK_PROVIDER_ID = "fallback";
 
-/** HTTP statuses that mean "this project is unwell" — try the next provider. */
-const TRANSIENT_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-/** HTTP statuses that mean "this request/key is wrong" — no point failing over. */
-const PERMANENT_STATUS = new Set([400, 401, 403, 404]);
+/**
+ * The only statuses that are the REQUEST's fault rather than the project's: a
+ * malformed body, or a model name that does not exist. Both fail identically
+ * everywhere, so failing over just spends a second project's quota to learn the
+ * same thing. Everything else — 401/403 (this key or project is rejected), 429
+ * (this project's quota), 5xx and timeouts — is provider-scoped and DOES fail
+ * over.
+ */
+const REQUEST_FAULT_STATUS = new Set([400, 404]);
 
 export interface PooledProvider {
   /** "primary" / "fallback" — the identity used everywhere else. */
@@ -250,12 +262,18 @@ export interface PoolAnalysis {
   providerName: string;
 }
 
-/** Classifies a failure: should the pool try the next provider? */
-function isTransient(error: unknown): boolean {
+/**
+ * Should the pool try the next project?
+ *
+ * Yes for anything the project itself is answerable for, no for a request that
+ * is wrong on its face. Unknown shapes (timeouts, network errors, statuses we
+ * have not seen) fail over: an unnecessary second attempt is far cheaper than
+ * abandoning an analysis a healthy project would have completed.
+ */
+function shouldFailOver(error: unknown): boolean {
   if (!(error instanceof AiCategoryProviderError)) return true; // timeout / network
   if (error.status === undefined) return true; // transport-level, no HTTP status
-  if (PERMANENT_STATUS.has(error.status)) return false;
-  return TRANSIENT_STATUS.has(error.status) || error.status >= 500;
+  return !REQUEST_FAULT_STATUS.has(error.status);
 }
 
 /**
@@ -318,10 +336,10 @@ export async function analyzeWithPool(
       const message = error instanceof Error ? error.message : String(error);
       const status = error instanceof AiCategoryProviderError ? error.status : undefined;
 
-      if (!isTransient(error)) {
-        // A bad request or a rejected key fails identically everywhere, so
-        // spending the next project's quota on it would only hide the problem.
-        logger.warn("ai.pool.permanent_failure", {
+      if (!shouldFailOver(error)) {
+        // The request itself is wrong; every project would reject it the same
+        // way, so spending another quota on it would only hide the problem.
+        logger.warn("ai.pool.request_fault", {
           ...context,
           provider: entry.id,
           status: status ?? null,
