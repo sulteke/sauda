@@ -97,11 +97,19 @@ export interface ProcessResult {
   item: ImportQueueItemDTO | null;
   remaining: number;
   /**
-   * True when the business day's AI allowance is used up. The selected item was
+   * True when the business day's AI allowance is genuinely used up. The item was
    * left in PENDING_ANALYSIS, so the caller should stop the loop; the work
    * resumes untouched on the next business day.
    */
   dailyLimitReached?: boolean;
+  /**
+   * Set instead of `dailyLimitReached` when the block is TEMPORARY: every
+   * project still has daily budget left, but each is cooling down after a 503
+   * or a rate-limit blip. The value is when the first one becomes usable again,
+   * so the caller can wait and carry on rather than abandoning the run — a busy
+   * minute at Google should not end an import that has budget to spend.
+   */
+  retryAfter?: string;
   /** AI calls issued so far in the current business day. */
   analyzedToday?: number;
 }
@@ -221,19 +229,21 @@ export async function processNextImport(): Promise<ProcessResult> {
     const budget = await analysisBudgetSnapshot();
     if (budget.reached) {
       const remaining = await countRemaining();
-      logger.info("queue.daily_limit_reached", {
+      const temporary = budget.retryAfter !== null;
+      logger.info(temporary ? "queue.cooling_down" : "queue.daily_limit_reached", {
         id: parseRow.id,
         instagramUrl: parseRow.instagramUrl,
         stage: "parse",
         analyzedToday: budget.used,
         limit: budget.limit,
         remaining,
+        retryAfter: budget.retryAfter?.toISOString() ?? null,
       });
       return {
         processed: false,
         item: null,
         remaining,
-        dailyLimitReached: true,
+        ...(temporary ? { retryAfter: budget.retryAfter!.toISOString() } : { dailyLimitReached: true }),
         analyzedToday: budget.used,
       };
     }
@@ -305,12 +315,22 @@ async function analysisBudgetSnapshot(): Promise<{
   reached: boolean;
   used: number;
   limit: number;
+  /** When a purely temporary block lifts; null when the day is truly spent. */
+  retryAfter: Date | null;
 }> {
   const { available, usage } = await anyProviderAvailable();
+
+  // A project that still has daily budget and is only waiting out a cooldown
+  // will come back on its own. The soonest of those is when work can resume.
+  const waiting = usage
+    .filter((u) => !u.available && u.used < u.limit && u.cooldownUntil !== null)
+    .map((u) => u.cooldownUntil!.getTime());
+
   return {
     reached: !available,
     used: usage.reduce((sum, u) => sum + u.used, 0),
     limit: usage.reduce((sum, u) => sum + u.limit, 0),
+    retryAfter: waiting.length > 0 ? new Date(Math.min(...waiting)) : null,
   };
 }
 
@@ -397,19 +417,22 @@ async function runAnalyzeStage(
   const budget = await analysisBudgetSnapshot();
   if (budget.reached) {
     const remaining = await countRemaining();
-    logger.info("queue.daily_limit_reached", {
+    const temporary = budget.retryAfter !== null;
+    logger.info(temporary ? "queue.cooling_down" : "queue.daily_limit_reached", {
       id,
       instagramUrl,
       analyzedToday: budget.used,
       limit: budget.limit,
       remaining,
+      retryAfter: budget.retryAfter?.toISOString() ?? null,
     });
-    // Left untouched in PENDING_ANALYSIS — picked up first on the next day.
+    // Left untouched in PENDING_ANALYSIS — resumed when the cooldown lifts, or
+    // on the next business day when the budget is genuinely spent.
     return {
       processed: false,
       item: null,
       remaining,
-      dailyLimitReached: true,
+      ...(temporary ? { retryAfter: budget.retryAfter!.toISOString() } : { dailyLimitReached: true }),
       analyzedToday: budget.used,
     };
   }

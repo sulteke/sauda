@@ -48,6 +48,12 @@ export interface ProcessResult {
   remaining: number;
   /** Today's AI allowance is spent — stop the loop and resume tomorrow. */
   dailyLimitReached?: boolean;
+  /**
+   * ISO instant at which a temporarily-unwell AI project becomes usable again.
+   * Budget is still available, so the loop should wait and carry on instead of
+   * ending the run.
+   */
+  retryAfter?: string;
   analyzedToday?: number;
 }
 

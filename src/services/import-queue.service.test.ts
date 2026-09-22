@@ -410,6 +410,95 @@ describe("daily analysis limit", () => {
   });
 });
 
+/**
+ * Every project is briefly unwell (503/504/429) but still has allowance left.
+ * Unlike a spent day, this clears on its own, so the caller is told WHEN.
+ */
+function coolDownAllProviders(primaryUntil: Date, fallbackUntil: Date) {
+  anyProviderAvailable.mockResolvedValue({
+    available: false,
+    usage: [
+      { id: "primary", projectId: "proj-a", used: 3, limit: 20, cooldownUntil: primaryUntil, available: false },
+      { id: "fallback", projectId: "proj-b", used: 1, limit: 20, cooldownUntil: fallbackUntil, available: false },
+    ],
+  });
+}
+
+describe("temporary provider cooldown (503/504) pauses instead of stopping", () => {
+  const soon = new Date("2026-09-23T10:10:00.000Z");
+  const later = new Date("2026-09-23T10:18:00.000Z");
+
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reports when to retry rather than ending the day", async () => {
+    pendingAnalysisWith(50_000);
+    coolDownAllProviders(soon, later);
+
+    const result = await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+    // Untouched, exactly as at the daily limit — but the caller may come back.
+    expect(update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ processed: false, item: null, retryAfter: soon.toISOString() });
+    // The run must NOT be told to give up for the day.
+    expect(result.dailyLimitReached).toBeUndefined();
+  });
+
+  it("waits only for the project that recovers first", async () => {
+    pendingAnalysisWith(50_000);
+    coolDownAllProviders(later, soon);
+
+    const result = await processNextImport();
+
+    expect(result.retryAfter).toBe(soon.toISOString());
+  });
+
+  it("ignores the cooldown of a project whose daily budget is already spent", async () => {
+    pendingAnalysisWith(50_000);
+    anyProviderAvailable.mockResolvedValue({
+      available: false,
+      usage: [
+        // Spent AND cooling down: waiting for it buys nothing — it is done for today.
+        { id: "primary", projectId: "proj-a", used: 20, limit: 20, cooldownUntil: soon, available: false },
+        { id: "fallback", projectId: "proj-b", used: 2, limit: 20, cooldownUntil: later, available: false },
+      ],
+    });
+
+    const result = await processNextImport();
+
+    expect(result.retryAfter).toBe(later.toISOString());
+  });
+
+  it("still stops for the day when the allowance is genuinely spent", async () => {
+    pendingAnalysisWith(50_000);
+    exhaustAllProviders();
+
+    const result = await processNextImport();
+
+    expect(result.dailyLimitReached).toBe(true);
+    expect(result.retryAfter).toBeUndefined();
+  });
+
+  it("pauses the parse stage too, so no Apify credit is spent while waiting", async () => {
+    findFirst
+      .mockResolvedValueOnce(null) // no pending analysis
+      .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    coolDownAllProviders(soon, later);
+
+    const result = await processNextImport();
+
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(result.retryAfter).toBe(soon.toISOString());
+    expect(result.dailyLimitReached).toBeUndefined();
+  });
+});
+
 describe("retryQueueItem", () => {
   beforeEach(() => {
     resetAll();

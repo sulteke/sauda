@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Loader2, Play, Square } from "lucide-react";
+import { Loader2, Pause, Play, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,11 @@ import type { DiscoveryCandidateDTO, ImportQueueStatus } from "@/types";
 const MAX_BATCH_SIZE = 10;
 /** Pause between process-next calls (matches Process Queue; avoids Gemini 429 bursts). */
 const PROCESS_DELAY_MS = 4000;
+/**
+ * Ceiling on one cooldown wait, so a stale row or a skewed clock can never park
+ * the import indefinitely — on reaching it the loop just tries again.
+ */
+const MAX_PAUSE_MS = 15 * 60 * 1000;
 
 // Terminal import-queue outcomes for one item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
@@ -47,6 +52,13 @@ interface Progress {
   skipped: number;
 }
 
+/** m:ss for the countdown shown while the import waits out a cooldown. */
+function formatCountdown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="rounded-md border p-2">
@@ -68,12 +80,35 @@ export function AutoImportPanel() {
   const processNext = useProcessNext();
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  /** Seconds left on the current cooldown wait; 0 when not parked. */
+  const [pausedFor, setPausedFor] = useState(0);
   const stopRef = useRef(false);
 
   const newCount = data?.length ?? 0;
 
+  /**
+   * Sits out a provider cooldown, ticking the countdown every second so the wait
+   * is visible and Stop stays responsive. Returns false if the user stopped.
+   */
+  async function waitForRetry(until: string): Promise<boolean> {
+    const target = new Date(until).getTime();
+    const deadline = Number.isFinite(target)
+      ? Math.min(target, Date.now() + MAX_PAUSE_MS)
+      : Date.now() + PROCESS_DELAY_MS;
+
+    while (Date.now() < deadline) {
+      if (stopRef.current) break;
+      setPausedFor(Math.max(1, Math.ceil((deadline - Date.now()) / 1000)));
+      await sleep(1000);
+    }
+
+    setPausedFor(0);
+    return !stopRef.current;
+  }
+
   async function start() {
     stopRef.current = false;
+    setPausedFor(0);
     setRunning(true);
 
     const discovered = newCount;
@@ -84,13 +119,15 @@ export function AutoImportPanel() {
     let failed = 0;
     let skipped = 0;
     let limitReached = false;
+    let pauses = 0;
     const render = () =>
       setProgress({ discovered, imported, batch, totalBatches, succeeded, failed, skipped });
     render();
 
     // Drain the import queue via the existing single-stage endpoint, counting the
     // terminal outcome of each item. Stops when the queue is empty, when the day's
-    // analysis allowance runs out, or on Stop.
+    // analysis allowance runs out, or on Stop. A passing 503/rate-limit blip is
+    // not a stop: the run parks until the project recovers, then carries on.
     async function drainQueue() {
       while (!stopRef.current) {
         const result = await processNext.mutateAsync();
@@ -99,6 +136,13 @@ export function AutoImportPanel() {
         else if (status && FAILED_STATUSES.includes(status)) failed += 1;
         else if (status && SKIPPED_STATUSES.includes(status)) skipped += 1;
         render();
+        // Every project is briefly unwell but still has allowance left — the
+        // item was left untouched, so wait it out and pick it up again.
+        if (result.retryAfter && result.remaining > 0) {
+          pauses += 1;
+          if (!(await waitForRetry(result.retryAfter))) break;
+          continue;
+        }
         // Allowance spent: the server left the item untouched, so another call
         // would re-select it. Stop here; the rest waits for the next day.
         if (result.dailyLimitReached) {
@@ -130,7 +174,8 @@ export function AutoImportPanel() {
       }
 
       const processed = succeeded + failed + skipped;
-      const detail = `Succeeded ${succeeded} · Failed ${failed} · Skipped ${skipped}`;
+      const waited = pauses > 0 ? ` Waited out ${pauses} cooldown${pauses === 1 ? "" : "s"}.` : "";
+      const detail = `Succeeded ${succeeded} · Failed ${failed} · Skipped ${skipped}${waited}`;
       if (limitReached) {
         toast.message("Daily analysis limit reached", {
           description: `${processed} processed · ${detail}. Remaining candidates stay queued for tomorrow.`,
@@ -150,6 +195,7 @@ export function AutoImportPanel() {
       toast.error(error instanceof Error ? error.message : "Import failed");
     } finally {
       setRunning(false);
+      setPausedFor(0);
     }
   }
 
@@ -174,9 +220,18 @@ export function AutoImportPanel() {
         {running ? (
           <>
             <Button disabled>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Importing batch {shown.batch} / {shown.totalBatches} ({shown.imported} /{" "}
-              {shown.discovered})...
+              {pausedFor > 0 ? (
+                <>
+                  <Pause className="h-4 w-4" />
+                  Paused — resuming in {formatCountdown(pausedFor)}
+                </>
+              ) : (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Importing batch {shown.batch} / {shown.totalBatches} ({shown.imported} /{" "}
+                  {shown.discovered})...
+                </>
+              )}
             </Button>
             <Button variant="outline" onClick={stop}>
               <Square className="h-4 w-4" />
