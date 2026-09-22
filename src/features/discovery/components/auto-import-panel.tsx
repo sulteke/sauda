@@ -22,6 +22,13 @@ const PROCESS_DELAY_MS = 4000;
  * the import indefinitely — on reaching it the loop just tries again.
  */
 const MAX_PAUSE_MS = 15 * 60 * 1000;
+/**
+ * How many cooldowns in a row may pass without a single item advancing before
+ * the import gives up. A passing blip clears in one wait; this many failures in
+ * a row means the outage is sustained, and a browser tab should not sit there
+ * retrying all night. Any successful item resets the count.
+ */
+const MAX_CONSECUTIVE_PAUSES = 3;
 
 // Terminal import-queue outcomes for one item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
@@ -120,6 +127,8 @@ export function AutoImportPanel() {
     let skipped = 0;
     let limitReached = false;
     let pauses = 0;
+    let consecutivePauses = 0;
+    let providersDown = false;
     const render = () =>
       setProgress({ discovered, imported, batch, totalBatches, succeeded, failed, skipped });
     render();
@@ -136,9 +145,16 @@ export function AutoImportPanel() {
         else if (status && FAILED_STATUSES.includes(status)) failed += 1;
         else if (status && SKIPPED_STATUSES.includes(status)) skipped += 1;
         render();
+        // Real progress means the outage passed — start counting again.
+        if (result.processed) consecutivePauses = 0;
         // Every project is briefly unwell but still has allowance left — the
         // item was left untouched, so wait it out and pick it up again.
         if (result.retryAfter && result.remaining > 0) {
+          consecutivePauses += 1;
+          if (consecutivePauses > MAX_CONSECUTIVE_PAUSES) {
+            providersDown = true;
+            break;
+          }
           pauses += 1;
           if (!(await waitForRetry(result.retryAfter))) break;
           continue;
@@ -158,7 +174,7 @@ export function AutoImportPanel() {
       // Resume-safe: finish anything already in the queue before taking new batches.
       await drainQueue();
 
-      while (!stopRef.current && !limitReached) {
+      while (!stopRef.current && !limitReached && !providersDown) {
         const candidates = await fetchNewCandidates();
         if (candidates.length === 0) break;
 
@@ -179,6 +195,10 @@ export function AutoImportPanel() {
       if (limitReached) {
         toast.message("Daily analysis limit reached", {
           description: `${processed} processed · ${detail}. Remaining candidates stay queued for tomorrow.`,
+        });
+      } else if (providersDown) {
+        toast.error("AI providers still unavailable", {
+          description: `Every project stayed down across ${MAX_CONSECUTIVE_PAUSES} retries. ${processed} processed · ${detail}. Remaining candidates stay queued.`,
         });
       } else if (stopRef.current) {
         toast.message("Import paused", {
