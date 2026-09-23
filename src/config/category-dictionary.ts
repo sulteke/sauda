@@ -47,6 +47,32 @@ export const CATEGORY_DICTIONARY: readonly CategoryDictionaryEntry[] = [
   { id: "joggery", label: "Джоггеры", keywords: ["джоггер", "джогер", "jogger"] },
   { id: "dzhinsy", label: "Джинсы", keywords: ["джинс", "jean", "denim"] },
   { id: "shorty", label: "Шорты", keywords: ["шорт", "shorts"] },
+  // Garment types the shop list needed: without these a dress or coat shop has
+  // no category to land in at all, and falls through to nothing.
+  { id: "maiki", label: "Майки", keywords: ["майка", "майки", "майок", "майках", "tanktop"] },
+  { id: "topy", label: "Топы", keywords: ["топы", "топик", "топов", "топами", "crop top"] },
+  { id: "bluzki", label: "Блузки", keywords: ["блуз", "blouse"] },
+  { id: "platya", label: "Платья", keywords: ["плать", "сукня", "dress"] },
+  { id: "yubki", label: "Юбки", keywords: ["юбк", "skirt"] },
+  { id: "bryuki", label: "Брюки", keywords: ["брюк", "штан", "trouser", "pants"] },
+  { id: "kostyumy", label: "Костюмы", keywords: ["костюм", "suit"] },
+  { id: "zhilety", label: "Жилеты", keywords: ["жилет", "vest", "безрукавк"] },
+  { id: "svitery", label: "Свитеры", keywords: ["свитер", "джемпер", "sweater", "пуловер"] },
+  { id: "kardigany", label: "Кардиганы", keywords: ["кардиган", "cardigan"] },
+  { id: "kurtki", label: "Куртки", keywords: ["куртк", "бомбер", "jacket", "анорак"] },
+  { id: "palto", label: "Пальто", keywords: ["пальто", "coat", "шуба"] },
+  { id: "plashchi", label: "Плащи", keywords: ["плащ", "тренч", "raincoat", "trench"] },
+  { id: "kombinezony", label: "Комбинезоны", keywords: ["комбинезон", "jumpsuit", "overall"] },
+  {
+    id: "sportivnaya-odezhda",
+    label: "Спортивная одежда",
+    keywords: ["спортивн", "sportswear", "фитнес", "леггинс", "activewear"],
+  },
+  {
+    id: "verhnyaya-odezhda",
+    label: "Верхняя одежда",
+    keywords: ["верхняя одежда", "верхней одежд", "пуховик", "outerwear", "сыртқы киім"],
+  },
   { id: "klassika", label: "Классика", keywords: ["классик", "classic"] },
   { id: "zhakety", label: "Жакеты", keywords: ["жакет", "пиджак", "blazer", "jacket"] },
   {

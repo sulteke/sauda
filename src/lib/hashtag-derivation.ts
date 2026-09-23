@@ -42,6 +42,22 @@ const CATEGORY_HASHTAGS: Record<string, readonly string[]> = {
   joggery: ["#низ", "#Спортивнаяодежда"],
   dzhinsy: ["#Джинсы", "#низ"],
   shorty: ["#Шорты", "#низ"],
+  maiki: ["#Майки", "#Верх"],
+  topy: ["#Топы", "#Верх"],
+  bluzki: ["#Блузки", "#Верх"],
+  platya: ["#Платья", "#Женскаяодежда"],
+  yubki: ["#Юбки", "#низ", "#Женскаяодежда"],
+  bryuki: ["#Брюки", "#низ"],
+  kostyumy: ["#Костюмы", "#Классика"],
+  zhilety: ["#Жилеты", "#Верх"],
+  svitery: ["#Свитеры", "#Верх"],
+  kardigany: ["#Кардиганы", "#Верх"],
+  kurtki: ["#Куртки", "#Верхняяодежда"],
+  palto: ["#Пальто", "#Верхняяодежда"],
+  plashchi: ["#Плащи", "#Верхняяодежда"],
+  kombinezony: ["#Комбинезоны"],
+  "sportivnaya-odezhda": ["#Спортивнаяодежда", "#Sport"],
+  "verhnyaya-odezhda": ["#Верхняяодежда"],
   klassika: ["#Классика", "#Деловойстиль"],
   zhakety: ["#Жакеты", "#Классика"],
   obuv: ["#Обувь"],
@@ -79,6 +95,11 @@ const HASHTAG_KEYWORDS: readonly { tag: string; keywords: readonly string[] }[] 
   { tag: "#Свитшоты", keywords: ["свитшот", "sweatshirt"] },
   { tag: "#Худи", keywords: ["худи", "hoodie", "толстовк"] },
   { tag: "#Топы", keywords: ["топы", "топик", "топов"] },
+  { tag: "#Майки", keywords: ["майка", "майки", "майок", "майках"] },
+  { tag: "#Свитеры", keywords: ["свитер", "джемпер", "пуловер", "sweater"] },
+  { tag: "#Толстовки", keywords: ["толстовк"] },
+  { tag: "#Пиджаки", keywords: ["пиджак"] },
+  { tag: "#Жилеты", keywords: ["жилет", "безрукавк"] },
   { tag: "#Блузки", keywords: ["блуз", "blouse"] },
   { tag: "#Поло", keywords: ["поло ", "футболка поло", "polo"] },
   { tag: "#Лонгсливы", keywords: ["лонгслив", "longsleeve"] },
@@ -95,11 +116,25 @@ const HASHTAG_KEYWORDS: readonly { tag: string; keywords: readonly string[] }[] 
   // Whole looks
   { tag: "#Платья", keywords: ["плать", "сукня", "dress", "көйлек"] },
   { tag: "#Костюмы", keywords: ["костюм", "suit"] },
+  { tag: "#Комбинезоны", keywords: ["комбинезон", "jumpsuit"] },
 
   // Outerwear
   { tag: "#Пальто", keywords: ["пальто", "coat"] },
   { tag: "#Куртки", keywords: ["куртк", "ветровк", "jacket", "пуховик"] },
+  { tag: "#Плащи", keywords: ["плащ", "тренч", "trench"] },
   { tag: "#Спортивнаяодежда", keywords: ["спортивн", "sportswear", "фитнес"] },
+
+  // Season. These need the season to be SAID — a photo of a coat is not
+  // evidence that the shop calls itself a winter-wear shop.
+  { tag: "#Верхняяодежда", keywords: ["верхняя одежда", "верхней одежд", "outerwear"] },
+  { tag: "#Зимняяодежда", keywords: ["зимняя одежда", "зимней одежд", "қысқы киім"] },
+  { tag: "#Теплаяодежда", keywords: ["теплая одежда", "тёплая одежда"] },
+  { tag: "#Демисезоннаяодежда", keywords: ["демисезон"] },
+  { tag: "#Пуховики", keywords: ["пуховик"] },
+
+  // Audience is one general tag; it pairs with a general garment tag rather
+  // than fusing into one. Only when the shop actually says unisex.
+  { tag: "#Унисексодежда", keywords: ["унисекс", "unisex"] },
 
   // Shoes
   { tag: "#Обувь", keywords: ["обув", "shoes", "аяқ киім"] },

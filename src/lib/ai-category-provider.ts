@@ -189,6 +189,9 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
         "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
         `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
         "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
+        "COMBINE ONE audience tag with ONE OR TWO garment tags — that is normally the whole set: womenswear jeans is #Женскаяодежда #Джинсы, menswear T-shirts is #Мужскаяодежда #Футболки, unisex hoodies is #Унисексодежда #Худи, women\'s sportswear is #Женскаяодежда #Спортивнаяодежда, and a winter men\'s jacket shop is #Мужскаяодежда #Куртки #Зимняяодежда. Two or three tags is the norm; reach for more only when the shop genuinely sells across several ranges.",
+        "NEVER repeat the same idea at two levels of detail. The audience tag already says who it is for, so do not follow it with a garment tag that repeats the audience, and do not pick a narrower tag when a broader one you already chose covers it.",
+        "Use an audience, seasonal or unisex tag ONLY when the profile actually says so. A coat in a photo is not evidence of #Зимняяодежда, and gender simply not being mentioned is not #Унисексодежда — use the plain garment tag alone whenever the profile does not state it.",
         'Return an empty "hashtags" array when the content supports none of them.',
       ]
     : [];

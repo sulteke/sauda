@@ -16,6 +16,9 @@ export type TelegramHashtagGroup =
   | "Core"
   | "Women"
   | "Men"
+  | "Unisex"
+  | "Sport"
+  | "Season"
   | "Shoes"
   | "Accessories"
   | "Children"
@@ -62,12 +65,35 @@ export const TELEGRAM_HASHTAGS: readonly TelegramHashtag[] = [
   { tag: "#Поло", group: "Men" },
   { tag: "#Лонгсливы", group: "Men" },
 
+  // Audience is ONE general tag, combined with a general garment tag rather
+  // than fused into it: a womenswear jeans shop is "#Женскаяодежда #Джинсы",
+  // never "#Женскиеджинсы". Fusing the two would double the vocabulary, make
+  // every post longer, and split Telegram search across near-identical tags.
+  { tag: "#Унисексодежда", group: "Unisex" },
+
   // Listed under both women's and men's clothing — one shared tag, not two.
   { tag: "#Брюки", group: "Core" },
   { tag: "#Костюмы", group: "Core" },
   { tag: "#Пальто", group: "Core" },
   { tag: "#Куртки", group: "Core" },
-  { tag: "#Спортивнаяодежда", group: "Core" },
+  { tag: "#Майки", group: "Core" },
+  { tag: "#Свитеры", group: "Core" },
+  { tag: "#Толстовки", group: "Core" },
+  { tag: "#Пиджаки", group: "Core" },
+  { tag: "#Жилеты", group: "Core" },
+  { tag: "#Плащи", group: "Core" },
+  { tag: "#Комбинезоны", group: "Core" },
+
+  { tag: "#Спортивнаяодежда", group: "Sport" },
+
+  // Seasonal range, combined the same way: a winter men's jacket shop reads
+  // "#Мужскаяодежда #Куртки #Зимняяодежда". These need the season to be
+  // stated, not guessed from a photo.
+  { tag: "#Верхняяодежда", group: "Season" },
+  { tag: "#Зимняяодежда", group: "Season" },
+  { tag: "#Теплаяодежда", group: "Season" },
+  { tag: "#Демисезоннаяодежда", group: "Season" },
+  { tag: "#Пуховики", group: "Season" },
 
   { tag: "#Кроссовки", group: "Shoes" },
   { tag: "#Кеды", group: "Shoes" },

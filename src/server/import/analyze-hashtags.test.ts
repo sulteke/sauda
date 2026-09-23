@@ -7,7 +7,11 @@ import {
   dailyAnalysisLimit,
   dailyTelegramPublishLimit,
 } from "@/config/limits";
-import { MAX_TELEGRAM_HASHTAGS, TELEGRAM_HASHTAG_LIST } from "@/config/telegram-hashtags";
+import {
+  MAX_TELEGRAM_HASHTAGS,
+  sanitizeHashtags,
+  TELEGRAM_HASHTAG_LIST,
+} from "@/config/telegram-hashtags";
 import { EMPTY_AI_RESULT } from "@/lib/ai-category-provider";
 import type { HybridDetectionResult } from "@/lib/category-pipeline";
 import { MIN_TELEGRAM_HASHTAGS } from "@/lib/hashtag-derivation";
@@ -138,6 +142,11 @@ describe("the hashtag work did not change any existing limit", () => {
   });
 
   it("introduces no separate hashtag quota — the whitelist is just data", () => {
-    expect(TELEGRAM_HASHTAG_LIST).toHaveLength(59);
+    // The whitelist is free to grow with the taxonomy; what must NOT move is
+    // how many tags reach a post. Offering the model every valid tag still
+    // yields at most MAX_TELEGRAM_HASHTAGS, so a bigger vocabulary can never
+    // turn into a bigger post — or into a second limit of its own.
+    expect(TELEGRAM_HASHTAG_LIST.length).toBeGreaterThan(MAX_TELEGRAM_HASHTAGS);
+    expect(sanitizeHashtags([...TELEGRAM_HASHTAG_LIST])).toHaveLength(MAX_TELEGRAM_HASHTAGS);
   });
 });
