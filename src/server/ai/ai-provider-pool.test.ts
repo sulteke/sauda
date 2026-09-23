@@ -15,6 +15,8 @@ vi.mock("@/lib/prisma", () => ({
 
 import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-category-provider";
 
+import { GeminiCategoryProvider } from "./gemini-category-provider";
+
 import {
   analyzeWithPool,
   anyProviderAvailable,
@@ -303,6 +305,24 @@ describe("failover between projects", () => {
     await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
     expect(fetchMock).toHaveBeenCalledTimes(2); // A once, B once
     expect(cooldownUpsert).toHaveBeenCalledTimes(2); // both parked
+  });
+
+  it("hands each project the time actually left, capped so one cannot starve the next", async () => {
+    // Regression: a fixed per-project budget cut a healthy fallback short
+    // mid-flight ("This operation was aborted") even though the primary had
+    // failed in under a second.
+    const analyzeSpy = vi.spyOn(GeminiCategoryProvider.prototype, "analyze");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()));
+
+    await analyzeWithPool(request());
+
+    const budgets = analyzeSpy.mock.calls.map((c) => (c[1] as { budgetMs: number }).budgetMs);
+    expect(budgets).toHaveLength(2);
+    // No project may take the whole request.
+    expect(budgets[0]!).toBeLessThanOrEqual(28_000);
+    // A 429 answers in under a second, so the fallback still gets a full-length
+    // attempt plus room to retry — not the leftovers of a fixed split.
+    expect(budgets[1]!).toBeGreaterThan(20_000);
   });
 
   it("retries each project in turn and never comes back — no A→B→A", async () => {

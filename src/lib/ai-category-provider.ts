@@ -94,9 +94,22 @@ export const EMPTY_AI_RESULT: AiCategoryResult = {
  * The pluggable seam. Implement this with Gemini/OpenAI/Claude and wire it via a
  * server-only resolver — nothing in the pipeline changes.
  */
+export interface AiCategoryAnalyzeOptions {
+  /**
+   * Wall-clock budget for this ONE call, overriding the provider's own default.
+   * A pool that may try several providers inside a single request uses it to
+   * hand each one only the time that is actually left, so a project that fails
+   * fast leaves its unused time to the next one.
+   */
+  budgetMs?: number;
+}
+
 export interface AiCategoryProvider {
   readonly name: string;
-  analyze(request: AiCategoryRequest): Promise<AiCategoryResult>;
+  analyze(
+    request: AiCategoryRequest,
+    options?: AiCategoryAnalyzeOptions,
+  ): Promise<AiCategoryResult>;
 }
 
 /**

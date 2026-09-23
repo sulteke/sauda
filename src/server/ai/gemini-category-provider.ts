@@ -1,6 +1,7 @@
 import "server-only";
 
 import {
+  type AiCategoryAnalyzeOptions,
   type AiCategoryProvider,
   AiCategoryProviderError,
   type AiCategoryRequest,
@@ -147,10 +148,13 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
     return { ...EMPTY_AI_RESULT };
   }
 
-  async analyze(request: AiCategoryRequest): Promise<AiCategoryResult> {
+  async analyze(
+    request: AiCategoryRequest,
+    options: AiCategoryAnalyzeOptions = {},
+  ): Promise<AiCategoryResult> {
     const prompt = buildAiCategoryPrompt(request);
     // Hard deadline for the whole call — every attempt and every backoff wait.
-    const deadline = Date.now() + this.analyzeBudgetMs;
+    const deadline = Date.now() + (options.budgetMs ?? this.analyzeBudgetMs);
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       // Stop if there isn't enough time left for a useful attempt.

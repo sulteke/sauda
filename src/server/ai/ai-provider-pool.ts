@@ -113,11 +113,20 @@ export class NoProviderAvailableError extends DailyAnalysisLimitError {
  */
 const POOLED_MAX_ATTEMPTS = 3;
 /**
- * Wall-clock budget per project. Both projects plus their retries must finish
- * inside the process-next route's 60s limit, leaving room for the queue's own
- * DB work and a cold start — so each gets well under half.
+ * Wall-clock budget for the WHOLE pooled call — every project, every retry. It
+ * must leave the process-next route (60s) room for the queue's own DB work and
+ * a cold start.
  */
-const POOLED_ANALYZE_BUDGET_MS = 22_000;
+const POOL_BUDGET_MS = 45_000;
+/**
+ * Most of that budget one project may take. Without a cap, a project that fails
+ * SLOWLY would starve the next one; with it, a healthy fallback still gets a
+ * full-length attempt plus a retry. A project that fails FAST (a 429 answers in
+ * under a second) simply leaves the rest of the budget to whoever follows.
+ */
+const PROVIDER_MAX_BUDGET_MS = 28_000;
+/** Below this there is no point starting a project: it could not finish. */
+const MIN_PROVIDER_BUDGET_MS = 6_000;
 
 /**
  * Builds the ordered provider list from the environment.
@@ -137,11 +146,9 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   // projects lands on the same busy model a second later — and parks both. The
   // budget is split so trying both projects, retries included, still fits the
   // route's function limit.
-  const shared = {
-    throwOnFailure: options.throwOnFailure,
-    maxAttempts: POOLED_MAX_ATTEMPTS,
-    analyzeBudgetMs: POOLED_ANALYZE_BUDGET_MS,
-  };
+  // The time budget is NOT fixed here: analyzeWithPool passes what is actually
+  // left when each project's turn comes.
+  const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: POOLED_MAX_ATTEMPTS };
 
   if (primaryKey) {
     providers.push({
@@ -322,6 +329,7 @@ export async function analyzeWithPool(
 
   const usage = await providerUsage(providers);
   const byId = new Map(usage.map((u) => [u.id, u]));
+  const poolDeadline = Date.now() + POOL_BUDGET_MS;
   let lastError: unknown;
   let attempted = 0;
 
@@ -339,9 +347,17 @@ export async function analyzeWithPool(
       continue;
     }
 
+    const budgetMs = Math.min(poolDeadline - Date.now(), PROVIDER_MAX_BUDGET_MS);
+    if (budgetMs < MIN_PROVIDER_BUDGET_MS) {
+      // Whatever ran before used the request's time; starting here would only
+      // abort mid-flight. The item stays retryable, with nothing spent.
+      logger.warn("ai.pool.out_of_time", { ...context, provider: entry.id, budgetMs });
+      break;
+    }
+
     attempted += 1;
     try {
-      const result = await entry.provider.analyze(request);
+      const result = await entry.provider.analyze(request, { budgetMs });
       logger.info("ai.pool.success", {
         ...context,
         provider: entry.id,
