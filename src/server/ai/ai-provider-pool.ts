@@ -107,6 +107,19 @@ export class NoProviderAvailableError extends DailyAnalysisLimitError {
 }
 
 /**
+ * Attempts one project gets before the pool moves on. Three covers a passing
+ * overload (600ms → 1200ms of waiting) without labouring a project that is
+ * genuinely down.
+ */
+const POOLED_MAX_ATTEMPTS = 3;
+/**
+ * Wall-clock budget per project. Both projects plus their retries must finish
+ * inside the process-next route's 60s limit, leaving room for the queue's own
+ * DB work and a cold start — so each gets well under half.
+ */
+const POOLED_ANALYZE_BUDGET_MS = 22_000;
+
+/**
  * Builds the ordered provider list from the environment.
  *
  * `GEMINI_API_KEY` still works as the primary, so an environment that predates
@@ -119,10 +132,16 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   const fallbackProject = process.env.GEMINI_FALLBACK_PROJECT_ID || null;
 
   const providers: PooledProvider[] = [];
-  // maxAttempts: 1 — the pool IS the retry layer now. Leaving the provider's own
-  // retry on would spend the whole time budget on a project we are about to
-  // abandon, and would delay the fallback that is standing right there.
-  const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: 1 };
+  // Each project retries its own transient faults before we give up on it. A
+  // 503 means the MODEL is busy, not that the project is unwell, so switching
+  // projects lands on the same busy model a second later — and parks both. The
+  // budget is split so trying both projects, retries included, still fits the
+  // route's function limit.
+  const shared = {
+    throwOnFailure: options.throwOnFailure,
+    maxAttempts: POOLED_MAX_ATTEMPTS,
+    analyzeBudgetMs: POOLED_ANALYZE_BUDGET_MS,
+  };
 
   if (primaryKey) {
     providers.push({

@@ -42,6 +42,7 @@ const ENV = [
   "GEMINI_PRIMARY_DAILY_LIMIT",
   "GEMINI_FALLBACK_DAILY_LIMIT",
   "GEMINI_PROVIDER_COOLDOWN_MINUTES",
+  "GEMINI_RETRY_DELAY_MS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -51,6 +52,9 @@ function configureBothProjects() {
   process.env.GEMINI_PRIMARY_PROJECT_ID = "project-a";
   process.env.GEMINI_FALLBACK_API_KEY = "key-b";
   process.env.GEMINI_FALLBACK_PROJECT_ID = "project-b";
+  // Retries are real here; only their WAITS are removed, so the tests exercise
+  // the same attempt sequence production does without sleeping through it.
+  process.env.GEMINI_RETRY_DELAY_MS = "0";
 }
 
 const request = (): AiCategoryRequest => ({
@@ -180,33 +184,76 @@ describe("failover between projects", () => {
     expect(cooldownUpsert).not.toHaveBeenCalled();
   });
 
-  it("A 429 → B succeeds", async () => {
+  it("A 429 → B succeeds, with NO retry wasted on A", async () => {
+    // A rate limit belongs to the project: waiting on it burns the budget while
+    // the other project sits idle, so the pool switches immediately.
     const fetchMock = vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await analyzeWithPool(request());
 
     expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(keyOf(fetchMock.mock.calls[0]!)).toBe("A");
-    expect(keyOf(fetchMock.mock.calls[1]!)).toBe("B");
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "B"]);
   });
 
-  it("A 503 → B succeeds", async () => {
+  it("a 503 that clears on retry is served by A — B is never called", async () => {
+    // The case that used to park BOTH projects for ten minutes over one blip.
     const fetchMock = vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
-    expect((await analyzeWithPool(request())).providerId).toBe(FALLBACK_PROVIDER_ID);
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(PRIMARY_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A"]);
+    // Nothing was wrong with the project, so nothing is parked.
+    expect(cooldownUpsert).not.toHaveBeenCalled();
   });
 
-  it("A times out / network-errors → B succeeds", async () => {
+  it("A 503 that never clears → B succeeds", async () => {
     const fetchMock = vi
       .fn()
-      .mockRejectedValueOnce(Object.assign(new Error("aborted"), { name: "AbortError" }))
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
-    expect((await analyzeWithPool(request())).providerId).toBe(FALLBACK_PROVIDER_ID);
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B"]);
+  });
+
+  it("the fallback retries its own transient failure before the run is lost", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(httpError(503))
+      .mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B", "B"]);
+  });
+
+  it("a timeout / network error is retried on A first, then falls over to B", async () => {
+    const aborted = () => Object.assign(new Error("aborted"), { name: "AbortError" });
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(aborted())
+      .mockRejectedValueOnce(aborted())
+      .mockRejectedValueOnce(aborted())
+      .mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B"]);
   });
 
   it("A 400 → B is NOT called (a bad request fails everywhere)", async () => {
@@ -258,15 +305,14 @@ describe("failover between projects", () => {
     expect(cooldownUpsert).toHaveBeenCalledTimes(2); // both parked
   });
 
-  it("spends at most ONE HTTP attempt per project — no internal retry, no A→B→A", async () => {
+  it("retries each project in turn and never comes back — no A→B→A", async () => {
     const fetchMock = vi.fn().mockResolvedValue(httpError(503));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(analyzeWithPool(request())).rejects.toThrow();
 
-    // Exactly two calls total: one per project, each with its own key.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "B"]);
+    // Each project gets its own retries, in order, exactly once.
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B", "B", "B"]);
   });
 });
 
@@ -289,7 +335,15 @@ describe("cooldown", () => {
 
   it("uses the configured cooldown duration rather than a hardcoded one", async () => {
     process.env.GEMINI_PROVIDER_COOLDOWN_MINUTES = "30";
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok()));
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(ok()),
+    );
 
     const before = Date.now();
     await analyzeWithPool(request());

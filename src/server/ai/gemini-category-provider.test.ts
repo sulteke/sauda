@@ -156,35 +156,65 @@ describe("GeminiCategoryProvider", () => {
     expect(result.categories).toEqual([]);
   });
 
-  it("retries a 429 honoring Google's retryDelay hint, then succeeds", async () => {
-    const retryBody =
-      '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0s"}]}}';
-    fetchMock
-      .mockResolvedValueOnce(errorResponse(429, retryBody))
-      .mockResolvedValueOnce(geminiResponse('{"categories":[{"id":"hudi","confidence":90}]}'));
-
-    const result = await new GeminiCategoryProvider("k", {
-      baseUrl: "https://gemini.test",
-    }).analyze(request());
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.categories).toEqual([{ id: "hudi", confidence: 90, reason: "" }]);
-  });
-
-  it("gives up after maxAttempts of persistent 429", async () => {
-    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"details":[{"retryDelay":"0s"}]}}'));
+  it("does NOT retry a 429 — the rate limit is the project's, so the caller switches", async () => {
+    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"code":429}}'));
 
     const result = await new GeminiCategoryProvider("k", {
       baseUrl: "https://gemini.test",
       maxAttempts: 3,
     }).analyze(request());
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // One attempt only: waiting here would burn the budget while the OTHER
+    // project — which has its own quota — sits idle.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.categories).toEqual([]);
   });
 
-  it("throws in strict mode after a persistent 429 (→ retryable ANALYSIS_FAILED)", async () => {
-    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"details":[{"retryDelay":"0s"}]}}'));
+  /** Reads the waits the provider logged, in order. */
+  function loggedWaits(warnSpy: { mock: { calls: unknown[][] } }): number[] {
+    return warnSpy.mock.calls
+      .map((c) => JSON.parse(String(c[0])) as { message: string; waitMs?: number })
+      .filter((e) => e.message === "gemini.retrying")
+      .map((e) => e.waitMs ?? -1);
+  }
+
+  it("backs off exponentially between 5xx retries", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5); // mid-spread: no net jitter
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(503))
+      .mockResolvedValueOnce(errorResponse(503))
+      .mockResolvedValueOnce(geminiResponse('{"categories":[]}'));
+
+    await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 3,
+      retryDelayMs: 100,
+    }).analyze(request());
+
+    expect(loggedWaits(warnSpy)).toEqual([100, 200]);
+  });
+
+  it("jitters each backoff, so parallel imports do not retry in lockstep", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(1); // top of the ±25% spread
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(503))
+      .mockResolvedValueOnce(errorResponse(503))
+      .mockResolvedValueOnce(geminiResponse('{"categories":[]}'));
+
+    await new GeminiCategoryProvider("k", {
+      baseUrl: "https://gemini.test",
+      maxAttempts: 3,
+      retryDelayMs: 100,
+    }).analyze(request());
+
+    // 100 → 125 and 200 → 250: the same curve, nudged off the shared beat.
+    expect(loggedWaits(warnSpy)).toEqual([125, 250]);
+  });
+
+  it("throws in strict mode on a 429 (→ fallback project, then ANALYSIS_FAILED)", async () => {
+    fetchMock.mockResolvedValue(errorResponse(429, '{"error":{"code":429}}'));
 
     await expect(
       new GeminiCategoryProvider("k", {
@@ -193,6 +223,7 @@ describe("GeminiCategoryProvider", () => {
         throwOnFailure: true,
       }).analyze(request()),
     ).rejects.toBeInstanceOf(AiCategoryProviderError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("never throws: retries then returns an empty result on a network error", async () => {

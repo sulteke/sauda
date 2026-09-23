@@ -154,6 +154,22 @@ describe("queue /analyze path (runAnalyze) records a slot ONLY on success", () =
     expect(marked.some((d) => d.analyzedAt !== undefined)).toBe(false);
   });
 
+  it("an AI retry never re-scrapes — Apify is untouched once rawProfile exists", async () => {
+    jobCount.mockResolvedValue(5); // budget free
+    analyze.mockRejectedValue(
+      new AiCategoryProviderError("Gemini request failed (503 Service Unavailable)", {
+        provider: "gemini",
+        status: 503,
+      }),
+    );
+
+    await expect(runAnalyze("job-1")).rejects.toBeInstanceOf(AiCategoryProviderError);
+
+    // Retries live inside the AI provider, well past the scrape — so however
+    // many attempts a 503 costs, none of them spends Apify credit.
+    expect(fetchProfile).not.toHaveBeenCalled();
+  });
+
   it("fails without recording when every provider is out of capacity", async () => {
     // The pool refuses inside analyze() once no project can run.
     analyze.mockRejectedValue(new DailyAnalysisLimitError(40, 40));
