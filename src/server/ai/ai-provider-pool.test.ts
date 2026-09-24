@@ -108,6 +108,7 @@ const ENV = [
   "GEMINI_FALLBACK_DAILY_LIMIT",
   "GEMINI_PROVIDER_COOLDOWN_MINUTES",
   "GEMINI_RETRY_DELAY_MS",
+  "GEMINI_POOL_MAX_ATTEMPTS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -280,14 +281,13 @@ describe("failover between projects", () => {
       .fn()
       .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(httpError(503))
-      .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await analyzeWithPool(request());
 
     expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
-    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B"]);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "B"]);
   });
 
   it("the fallback retries its own transient failure before the run is lost", async () => {
@@ -296,14 +296,13 @@ describe("failover between projects", () => {
       .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(httpError(503))
-      .mockResolvedValueOnce(httpError(503))
       .mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await analyzeWithPool(request());
 
     expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
-    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B", "B"]);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "B", "B"]);
   });
 
   it("a timeout / network error is retried on A first, then falls over to B", async () => {
@@ -312,14 +311,13 @@ describe("failover between projects", () => {
       .fn()
       .mockRejectedValueOnce(aborted())
       .mockRejectedValueOnce(aborted())
-      .mockRejectedValueOnce(aborted())
       .mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await analyzeWithPool(request());
 
     expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
-    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B"]);
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "B"]);
   });
 
   it("A 400 → B is NOT called (a bad request fails everywhere)", async () => {
@@ -389,14 +387,27 @@ describe("failover between projects", () => {
     expect(budgets[1]!).toBeGreaterThan(20_000);
   });
 
+  it("honours GEMINI_POOL_MAX_ATTEMPTS, so the retry budget is tunable without a deploy", async () => {
+    // How much a sustained outage costs is the kind of number that moves with
+    // the provider's mood, so it must not need a code change to adjust.
+    process.env.GEMINI_POOL_MAX_ATTEMPTS = "1";
+    const fetchMock = vi.fn().mockResolvedValue(httpError(503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toThrow();
+
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "B"]);
+  });
+
   it("retries each project in turn and never comes back — no A→B→A", async () => {
     const fetchMock = vi.fn().mockResolvedValue(httpError(503));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(analyzeWithPool(request())).rejects.toThrow();
 
-    // Each project gets its own retries, in order, exactly once.
-    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "A", "B", "B", "B"]);
+    // Each project gets its own retries, in order, exactly once. Two attempts
+    // each: four requests to learn the outage, not six.
+    expect(fetchMock.mock.calls.map(keyOf)).toEqual(["A", "A", "B", "B"]);
   });
 });
 
@@ -484,19 +495,15 @@ describe("request ledger — counts requests, not analyses", () => {
     expect(used(FALLBACK_PROVIDER_ID)).toBe(0);
   });
 
-  it("counts EVERY retry — three attempts spend three slots", async () => {
+  it("counts EVERY retry — a retried call spends two slots", async () => {
     vi.stubGlobal(
       "fetch",
-      vi
-        .fn()
-        .mockResolvedValueOnce(httpError(503))
-        .mockResolvedValueOnce(httpError(503))
-        .mockResolvedValueOnce(ok()),
+      vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok()),
     );
 
     await analyzeWithPool(request());
 
-    expect(used(PRIMARY_PROVIDER_ID)).toBe(3);
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(2);
   });
 
   it("counts requests that FAILED — the old counter missed exactly these", async () => {
@@ -504,9 +511,9 @@ describe("request ledger — counts requests, not analyses", () => {
 
     await expect(analyzeWithPool(request())).rejects.toThrow();
 
-    // Three attempts on each project, all failed, all charged.
-    expect(used(PRIMARY_PROVIDER_ID)).toBe(3);
-    expect(used(FALLBACK_PROVIDER_ID)).toBe(3);
+    // Two attempts on each project, all failed, all charged.
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(2);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(2);
   });
 
   it("sends NOTHING once the allowance is spent mid-flight", async () => {
@@ -630,5 +637,186 @@ describe("per-project daily budget", () => {
   it("never blocks the queue when no AI is configured at all", async () => {
     for (const k of ENV) delete process.env[k];
     expect(await anyProviderAvailable()).toEqual({ available: true, usage: [] });
+  });
+});
+
+/**
+ * Ledger audit. Each case pins one claim about what the ledger counts, because
+ * the whole point of the table is that its number matches what Google charged —
+ * a counter that drifts is worse than no counter, since it is still trusted.
+ */
+describe("AUDIT — request ledger accounting", () => {
+  beforeEach(configureBothProjects);
+
+  const used = (provider: string) =>
+    ledger.rows.get(`${provider}\u0000${DEFAULT_GEMINI_MODEL}`)?.used ?? 0;
+  const total = () => used(PRIMARY_PROVIDER_ID) + used(FALLBACK_PROVIDER_ID);
+
+  it("[1] reserves a slot before EVERY request — one call, one slot", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+    await analyzeWithPool(request());
+    expect(total()).toBe(1);
+  });
+
+  it("[2][3] a 503 retry is a NEW request and takes its own slot", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok()),
+    );
+    await analyzeWithPool(request());
+    // Two HTTP calls on the same project → two slots, not one.
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(2);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(0);
+  });
+
+  it("[4] a 429 is charged too, even though it is never retried", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()),
+    );
+    await analyzeWithPool(request());
+    // A refusal still crossed the wire and still counted against the quota.
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(1);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(1);
+  });
+
+  it("[5] a timeout / network error is charged — the request went out", async () => {
+    const aborted = () => Object.assign(new Error("aborted"), { name: "AbortError" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValueOnce(aborted()).mockRejectedValueOnce(aborted()).mockResolvedValueOnce(ok()),
+    );
+    await analyzeWithPool(request());
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(2); // both failed attempts charged
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(1);
+  });
+
+  it("[6] a spent ledger sends NOTHING — no HTTP call is made at all", async () => {
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("[6] a ledger that runs out MID-FLIGHT stops the retry before it is sent", async () => {
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 19); // one slot left
+    const fetchMock = vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await analyzeWithPool(request());
+
+    // The retry was refused a slot, so primary made ONE call, not two.
+    expect(fetchMock.mock.calls.filter((c) => keyOf(c) === "A")).toHaveLength(1);
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(20);
+  });
+
+  it("[11] a cooling-down project costs NO slot — it is skipped, not called", async () => {
+    cooldownFindMany.mockResolvedValue([
+      { provider: PRIMARY_PROVIDER_ID, cooldownUntil: new Date(Date.now() + 600_000) },
+    ]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+
+    await analyzeWithPool(request());
+
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(0); // never touched
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(1);
+  });
+
+  it("[11] cooldown and ledger gate independently — either one blocks", async () => {
+    // Primary parked by cooldown, fallback spent by the ledger: nothing can run.
+    cooldownFindMany.mockResolvedValue([
+      { provider: PRIMARY_PROVIDER_ID, cooldownUntil: new Date(Date.now() + 600_000) },
+    ]);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("[12] THE SCENARIO: A 503, A 503, B 200 → ledger 3, served by fallback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(ok()),
+    );
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(2);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(1);
+    expect(total()).toBe(3);
+    // One analysis, and it is attributed to the project that produced it — the
+    // caller stamps analyzedAt/analyzedBy from exactly this value.
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+  });
+});
+
+/**
+ * With two attempts per project, what is the WORST a single boutique can cost?
+ * Written down as tests so the ceiling cannot drift without someone noticing.
+ */
+describe("AUDIT — maximum requests per boutique (2 attempts)", () => {
+  beforeEach(configureBothProjects);
+
+  const spent = () =>
+    (ledger.rows.get(`${PRIMARY_PROVIDER_ID}\u0000${DEFAULT_GEMINI_MODEL}`)?.used ?? 0) +
+    (ledger.rows.get(`${FALLBACK_PROVIDER_ID}\u0000${DEFAULT_GEMINI_MODEL}`)?.used ?? 0);
+
+  it("primary transient, fallback succeeds → 3", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok()),
+    );
+    await analyzeWithPool(request());
+    expect(spent()).toBe(3);
+  });
+
+  it("BOTH transient → 4, the absolute ceiling", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(httpError(503)));
+    await expect(analyzeWithPool(request())).rejects.toThrow();
+    expect(spent()).toBe(4);
+  });
+
+  it("429 on both → 2 (never retried)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(httpError(429)));
+    await expect(analyzeWithPool(request())).rejects.toThrow();
+    expect(spent()).toBe(2);
+  });
+
+  it("primary cooling down, fallback succeeds → 1", async () => {
+    cooldownFindMany.mockResolvedValue([
+      { provider: PRIMARY_PROVIDER_ID, cooldownUntil: new Date(Date.now() + 600_000) },
+    ]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+    await analyzeWithPool(request());
+    expect(spent()).toBe(1);
+  });
+
+  it("no provider available → 0 NEW requests", async () => {
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    const before = spent();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
+
+    // Nothing sent, so nothing charged: the ledger sits exactly where it was.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(spent() - before).toBe(0);
+  });
+
+  it("a 400 request fault → 1, the fallback is never charged", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(httpError(400)));
+    await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
+    expect(spent()).toBe(1);
   });
 });

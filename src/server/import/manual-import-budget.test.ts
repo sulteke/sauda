@@ -170,6 +170,24 @@ describe("queue /analyze path (runAnalyze) records a slot ONLY on success", () =
     expect(fetchProfile).not.toHaveBeenCalled();
   });
 
+  it("AUDIT [8][9]: a failure writes NEITHER analyzedAt NOR analyzedBy", async () => {
+    jobCount.mockResolvedValue(5);
+    analyze.mockRejectedValue(
+      new AiCategoryProviderError("Gemini request failed (503 Service Unavailable)", {
+        provider: "gemini",
+        status: 503,
+      }),
+    );
+
+    await expect(runAnalyze("job-1")).rejects.toBeInstanceOf(AiCategoryProviderError);
+
+    // The two are written together or not at all — an attribution without a
+    // result would claim a project produced something it never did.
+    const written = jobUpdate.mock.calls.map((c) => (c[0] as { data: Record<string, unknown> }).data);
+    expect(written.some((d) => d.analyzedAt !== undefined)).toBe(false);
+    expect(written.some((d) => d.analyzedBy !== undefined)).toBe(false);
+  });
+
   it("fails without recording when every provider is out of capacity", async () => {
     // The pool refuses inside analyze() once no project can run.
     analyze.mockRejectedValue(new DailyAnalysisLimitError(40, 40));

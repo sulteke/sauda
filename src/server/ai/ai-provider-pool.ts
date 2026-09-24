@@ -114,11 +114,22 @@ export class NoProviderAvailableError extends DailyAnalysisLimitError {
 }
 
 /**
- * Attempts one project gets before the pool moves on. Three covers a passing
- * overload (600ms → 1200ms of waiting) without labouring a project that is
- * genuinely down.
+ * Attempts one project gets before the pool moves on.
+ *
+ * Two, not three. A retry earns its place when the overload is a blip — one
+ * short wait and the same project answers. It stops earning anything once the
+ * overload is sustained, and measurement says that is the common case: a day
+ * of 503s spent 29 requests to produce 5 analyses, because every boutique
+ * burned three attempts per project before moving on. Two caps the worst case
+ * at four requests instead of six while still covering the blip.
+ *
+ * Overridable: GEMINI_POOL_MAX_ATTEMPTS.
  */
-const POOLED_MAX_ATTEMPTS = 3;
+function pooledMaxAttempts(): number {
+  const env = Number(process.env.GEMINI_POOL_MAX_ATTEMPTS);
+  return Number.isFinite(env) && env > 0 ? Math.floor(env) : 2;
+}
+
 /**
  * Wall-clock budget for the WHOLE pooled call — every project, every retry. It
  * must leave the process-next route (60s) room for the queue's own DB work and
@@ -154,12 +165,13 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   const reserve = (id: string, limit: number) => () => reserveRequest(id, model, limit);
   // Each project retries its own transient faults before we give up on it. A
   // 503 means the MODEL is busy, not that the project is unwell, so switching
-  // projects lands on the same busy model a second later — and parks both. The
-  // budget is split so trying both projects, retries included, still fits the
-  // route's function limit.
+  // projects lands on the same busy model a second later — and parks both.
+  // Which is also why the retry count is small: when the overload is real it
+  // covers the whole model, and extra attempts only spend quota to confirm it.
+  //
   // The time budget is NOT fixed here: analyzeWithPool passes what is actually
   // left when each project's turn comes.
-  const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: POOLED_MAX_ATTEMPTS };
+  const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: pooledMaxAttempts() };
 
   if (primaryKey) {
     const dailyLimit = geminiPrimaryDailyLimit();
