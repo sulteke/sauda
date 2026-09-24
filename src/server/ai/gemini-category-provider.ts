@@ -6,6 +6,7 @@ import {
   AiCategoryProviderError,
   type AiCategoryRequest,
   type AiCategoryResult,
+  type QuotaScope,
   buildAiCategoryPrompt,
   disabledAiCategoryProvider,
   EMPTY_AI_RESULT,
@@ -53,6 +54,18 @@ const DEFAULT_ANALYZE_BUDGET_MS = 40_000;
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Reads WHICH limit a 429 hit out of Google's error body. The violation names
+ * the quota, e.g. "GenerateRequestsPerMinutePerProjectPerModel-FreeTier" or
+ * "...PerDayPerProjectPerModel-FreeTier". Null when the body does not say —
+ * the caller then has to assume the cautious case.
+ */
+export function parseQuotaScope(body: string): QuotaScope | null {
+  if (/PerDay/i.test(body)) return "per-day";
+  if (/PerMinute/i.test(body)) return "per-minute";
+  return null;
+}
+
+/**
  * Exponential backoff with jitter: 600ms → 1200ms → 2400ms, each spread by
  * BACKOFF_JITTER. A base of 0 yields 0, so tests stay instant and exact.
  */
@@ -68,6 +81,13 @@ export interface GeminiProviderOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   retryDelayMs?: number;
+  /**
+   * Called before EVERY HTTP attempt, retries included. Returning false means
+   * the caller has no request allowance left, and the provider sends nothing.
+   * This is where the request ledger takes its slot, so the count matches what
+   * actually went out rather than what came back.
+   */
+  beforeRequest?: () => Promise<boolean>;
   /**
    * Wall-clock budget for a whole analyze() call — every attempt and every
    * backoff wait. The pool shrinks it so that trying BOTH projects, each with
@@ -104,6 +124,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
   private readonly maxAttempts: number;
   private readonly retryDelayMs: number;
   private readonly analyzeBudgetMs: number;
+  private readonly beforeRequest?: () => Promise<boolean>;
   private readonly throwOnFailure: boolean;
 
   constructor(apiKey: string, options: GeminiProviderOptions = {}) {
@@ -126,6 +147,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
         ? envRetryDelay
         : DEFAULT_RETRY_DELAY_MS);
     this.analyzeBudgetMs = options.analyzeBudgetMs ?? DEFAULT_ANALYZE_BUDGET_MS;
+    this.beforeRequest = options.beforeRequest;
   }
 
   /** The API key lives only in the query string; never log this URL. */
@@ -137,12 +159,18 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
    * Terminal outcome of a failed request: throw when the caller opted into
    * strict mode, otherwise degrade to an empty result (the historical default).
    */
-  private fail(reason: { status?: number; message: string; cause?: unknown }): AiCategoryResult {
+  private fail(reason: {
+    status?: number;
+    message: string;
+    cause?: unknown;
+    quotaScope?: QuotaScope;
+  }): AiCategoryResult {
     if (this.throwOnFailure) {
       throw new AiCategoryProviderError(reason.message, {
         provider: this.name,
         status: reason.status,
         cause: reason.cause,
+        quotaScope: reason.quotaScope,
       });
     }
     return { ...EMPTY_AI_RESULT };
@@ -160,6 +188,20 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
       // Stop if there isn't enough time left for a useful attempt.
       const budgetLeft = deadline - Date.now();
       if (budgetLeft <= 1_000) break;
+
+      // Take a request slot BEFORE going out, so the ledger counts what was
+      // actually sent. No slot means no request — not even a retry.
+      if (this.beforeRequest && !(await this.beforeRequest())) {
+        logger.warn("gemini.request_budget_spent", {
+          provider: this.name,
+          model: this.model,
+          attempt,
+        });
+        return this.fail({
+          message: `Gemini request budget spent for ${this.model} today`,
+          quotaScope: "per-day",
+        });
+      }
 
       const controller = new AbortController();
       // Cap this attempt to the smaller of the per-request timeout and time left,
@@ -234,6 +276,10 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
         return this.fail({
           status: response.status,
           message: `Gemini request failed (${response.status} ${response.statusText})`,
+          // A 429 names the limit it hit; the pool reacts very differently to
+          // "this minute is full" than to "this day is gone".
+          quotaScope:
+            response.status === 429 ? (parseQuotaScope(body) ?? undefined) : undefined,
         });
       } catch (error) {
         // A strict-mode failure we raised for a non-OK response must bubble out

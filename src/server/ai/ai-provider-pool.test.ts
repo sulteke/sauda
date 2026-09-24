@@ -1,21 +1,84 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { jobCount, cooldownFindMany, cooldownUpsert } = vi.hoisted(() => ({
-  jobCount: vi.fn(),
-  cooldownFindMany: vi.fn(),
-  cooldownUpsert: vi.fn(),
-}));
+/**
+ * In-memory stand-in for the request ledger. Each test runs at a single
+ * instant, so rows are keyed by provider+model and the day is ignored —
+ * everything else (the `used < limit` guard, the unique conflict on create)
+ * behaves as Postgres does, because those are what the pool relies on.
+ */
+const { jobCount, cooldownFindMany, cooldownUpsert, ledger } = vi.hoisted(() => {
+  const rows = new Map<string, { provider: string; model: string; day: string; used: number }>();
+  const key = (provider: string, model: string) => `${provider}\u0000${model}`;
+  type Where = { provider: string; model: string; day: string; used?: { lt: number } };
+
+  const bump = async ({ where, data }: { where: Where; data: { used: { increment: number } } }) => {
+    const row = rows.get(key(where.provider, where.model));
+    if (!row) return { count: 0 };
+    const limit = where.used?.lt;
+    if (limit !== undefined && row.used >= limit) return { count: 0 };
+    row.used += data.used.increment;
+    return { count: 1 };
+  };
+
+  return {
+    jobCount: vi.fn(),
+    cooldownFindMany: vi.fn(),
+    cooldownUpsert: vi.fn(),
+    ledger: {
+      rows,
+      seed: (provider: string, model: string, used: number) =>
+        rows.set(key(provider, model), { provider, model, day: "test", used }),
+      client: {
+        findMany: vi.fn(async ({ where }: { where: { OR: { provider: string; model: string }[] } }) =>
+          [...rows.values()].filter((r) =>
+            where.OR.some((p) => p.provider === r.provider && p.model === r.model),
+          ),
+        ),
+        findUnique: vi.fn(async ({ where }: { where: { provider_model_day: Where } }) => {
+          const w = where.provider_model_day;
+          return rows.get(key(w.provider, w.model)) ?? null;
+        }),
+        updateMany: vi.fn(bump),
+        create: vi.fn(async ({ data }: { data: { provider: string; model: string; day: string; used: number } }) => {
+          const k = key(data.provider, data.model);
+          if (rows.has(k)) throw new Error("unique constraint");
+          rows.set(k, { ...data });
+          return data;
+        }),
+        upsert: vi.fn(
+          async ({
+            where,
+            update,
+            create,
+          }: {
+            where: { provider_model_day: Where };
+            update: { used: number };
+            create: { provider: string; model: string; day: string; used: number };
+          }) => {
+            const w = where.provider_model_day;
+            const k = key(w.provider, w.model);
+            const existing = rows.get(k);
+            if (existing) existing.used = update.used;
+            else rows.set(k, { ...create });
+            return rows.get(k)!;
+          },
+        ),
+      },
+    },
+  };
+});
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     importJob: { count: jobCount },
     aiProviderCooldown: { findMany: cooldownFindMany, upsert: cooldownUpsert },
+    aiRequestLedger: ledger.client,
   },
 }));
 
 import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-category-provider";
 
-import { GeminiCategoryProvider } from "./gemini-category-provider";
+import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
 
 import {
   analyzeWithPool,
@@ -83,12 +146,12 @@ const ok = () =>
     }),
   }) as unknown as Response;
 
-const httpError = (status: number) =>
+const httpError = (status: number, body = `{"error":{"code":${status}}}`) =>
   ({
     ok: false,
     status,
     statusText: `HTTP ${status}`,
-    text: async () => `{"error":{"code":${status}}}`,
+    text: async () => body,
     json: async () => ({}),
   }) as unknown as Response;
 
@@ -104,6 +167,7 @@ beforeEach(() => {
   cooldownFindMany.mockReset();
   cooldownUpsert.mockReset();
   jobCount.mockResolvedValue(0);
+  ledger.rows.clear();
   cooldownFindMany.mockResolvedValue([]);
   cooldownUpsert.mockResolvedValue({});
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -400,13 +464,129 @@ describe("cooldown", () => {
   });
 });
 
+/**
+ * The ledger counts what Google counts: requests SENT. A day that spends fifty
+ * requests and produces five analyses must read as fifty, or we keep arguing
+ * with a quota that is already gone.
+ */
+describe("request ledger — counts requests, not analyses", () => {
+  beforeEach(configureBothProjects);
+
+  const used = (provider: string) =>
+    ledger.rows.get(`${provider}\u0000${DEFAULT_GEMINI_MODEL}`)?.used ?? 0;
+
+  it("counts ONE slot for a request that succeeds first time", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+
+    await analyzeWithPool(request());
+
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(1);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(0);
+  });
+
+  it("counts EVERY retry — three attempts spend three slots", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(ok()),
+    );
+
+    await analyzeWithPool(request());
+
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(3);
+  });
+
+  it("counts requests that FAILED — the old counter missed exactly these", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(httpError(503)));
+
+    await expect(analyzeWithPool(request())).rejects.toThrow();
+
+    // Three attempts on each project, all failed, all charged.
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(3);
+    expect(used(FALLBACK_PROVIDER_ID)).toBe(3);
+  });
+
+  it("sends NOTHING once the allowance is spent mid-flight", async () => {
+    // One slot left: the first attempt takes it, the retry cannot.
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 19);
+    const fetchMock = vi.fn().mockResolvedValue(httpError(503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toThrow();
+
+    // Primary sent exactly one request, not three; the rest went to B.
+    expect(fetchMock.mock.calls.filter((c) => keyOf(c) === "A")).toHaveLength(1);
+    expect(used(PRIMARY_PROVIDER_ID)).toBe(20);
+  });
+});
+
+describe("429 is two different failures", () => {
+  beforeEach(configureBothProjects);
+
+  /** A Google 429 body naming the quota that was exceeded. */
+  const quotaBody = (scope: "PerMinute" | "PerDay") =>
+    `{"error":{"code":429,"details":[{"violations":[{"quotaId":"GenerateRequests${scope}PerProjectPerModel-FreeTier"}]}]}}`;
+
+  it("per-DAY: burns the rest of the project's ledger and does not cool it down", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(429, quotaBody("PerDay"))).mockResolvedValueOnce(ok()),
+    );
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(FALLBACK_PROVIDER_ID);
+    // Spent for the day — a ten-minute cooldown could not bring it back.
+    expect(ledger.rows.get(`${PRIMARY_PROVIDER_ID}\u0000${DEFAULT_GEMINI_MODEL}`)?.used).toBe(20);
+    expect(cooldownUpsert).not.toHaveBeenCalled();
+  });
+
+  it("per-MINUTE: parks the project only briefly, keeping the day's allowance", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(429, quotaBody("PerMinute")))
+        .mockResolvedValueOnce(ok()),
+    );
+
+    const before = Date.now();
+    await analyzeWithPool(request());
+
+    const { create } = cooldownUpsert.mock.calls[0]?.[0] as { create: { cooldownUntil: Date } };
+    const seconds = (create.cooldownUntil.getTime() - before) / 1000;
+    expect(seconds).toBeGreaterThan(30);
+    expect(seconds).toBeLessThanOrEqual(61); // ~60s, not the 10-minute default
+  });
+
+  it("an unlabelled 429 keeps the cautious default cooldown", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(429, '{"error":{"code":429}}')).mockResolvedValueOnce(ok()),
+    );
+
+    const before = Date.now();
+    await analyzeWithPool(request());
+
+    const { create } = cooldownUpsert.mock.calls[0]?.[0] as { create: { cooldownUntil: Date } };
+    const minutes = (create.cooldownUntil.getTime() - before) / 60_000;
+    expect(minutes).toBeGreaterThan(9);
+  });
+});
+
 describe("per-project daily budget", () => {
   beforeEach(configureBothProjects);
 
+  /** Pretend this project has already SENT `used` requests today. */
+  const spent = (provider: string, used: number) =>
+    ledger.seed(provider, DEFAULT_GEMINI_MODEL, used);
+
   it("counts each project separately, never as one pooled number", async () => {
-    jobCount.mockImplementation(({ where }: { where: { analyzedBy: string } }) =>
-      Promise.resolve(where.analyzedBy === PRIMARY_PROVIDER_ID ? 20 : 3),
-    );
+    spent(PRIMARY_PROVIDER_ID, 20);
+    spent(FALLBACK_PROVIDER_ID, 3);
 
     const usage = await providerUsage();
 
@@ -417,9 +597,7 @@ describe("per-project daily budget", () => {
   });
 
   it("an exhausted primary routes the next boutique directly to the fallback", async () => {
-    jobCount.mockImplementation(({ where }: { where: { analyzedBy: string } }) =>
-      Promise.resolve(where.analyzedBy === PRIMARY_PROVIDER_ID ? 20 : 0),
-    );
+    spent(PRIMARY_PROVIDER_ID, 20);
     const fetchMock = vi.fn().mockResolvedValue(ok());
     vi.stubGlobal("fetch", fetchMock);
 
@@ -431,7 +609,8 @@ describe("per-project daily budget", () => {
   });
 
   it("refuses when BOTH projects are spent, without calling either", async () => {
-    jobCount.mockResolvedValue(20);
+    spent(PRIMARY_PROVIDER_ID, 20);
+    spent(FALLBACK_PROVIDER_ID, 20);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -440,10 +619,11 @@ describe("per-project daily budget", () => {
   });
 
   it("reports availability for the queue's pre-check", async () => {
-    jobCount.mockResolvedValue(20);
+    spent(PRIMARY_PROVIDER_ID, 20);
+    spent(FALLBACK_PROVIDER_ID, 20);
     expect(await anyProviderAvailable()).toMatchObject({ available: false });
 
-    jobCount.mockResolvedValue(0);
+    ledger.rows.clear();
     expect(await anyProviderAvailable()).toMatchObject({ available: true });
   });
 

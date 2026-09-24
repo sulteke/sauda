@@ -19,6 +19,8 @@ export function AddToQueueForm() {
       const result = await addToQueue.mutateAsync(text);
       const parts = [`Added ${result.added} URL${result.added === 1 ? "" : "s"}`];
       if (result.skipped > 0) parts.push(`skipped ${result.skipped} invalid`);
+      // Named apart from "invalid": the URL was fine, we simply have it already.
+      if (result.duplicates > 0) parts.push(`skipped ${result.duplicates} already imported`);
       toast.success(parts.join(", "));
       setText("");
     } catch (error) {

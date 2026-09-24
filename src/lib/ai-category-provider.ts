@@ -112,6 +112,9 @@ export interface AiCategoryProvider {
   ): Promise<AiCategoryResult>;
 }
 
+/** Which rate limit a 429 hit — they demand opposite responses. */
+export type QuotaScope = "per-minute" | "per-day";
+
 /**
  * Raised when a real AI provider fails terminally (transport error, timeout, or
  * a non-recoverable API status after retries). Providers degrade GRACEFULLY by
@@ -123,12 +126,23 @@ export interface AiCategoryProvider {
 export class AiCategoryProviderError extends Error {
   readonly provider: string;
   readonly status?: number;
+  /**
+   * Which allowance a 429 exhausted, when the provider said so. The two are
+   * nothing alike: "per-minute" clears in seconds, "per-day" is gone until the
+   * quota resets. Undefined when the provider did not say, or the failure was
+   * not a rate limit.
+   */
+  readonly quotaScope?: QuotaScope;
 
-  constructor(message: string, options: { provider: string; status?: number; cause?: unknown }) {
+  constructor(
+    message: string,
+    options: { provider: string; status?: number; cause?: unknown; quotaScope?: QuotaScope },
+  ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "AiCategoryProviderError";
     this.provider = options.provider;
     this.status = options.status;
+    this.quotaScope = options.quotaScope;
   }
 }
 

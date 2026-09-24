@@ -34,7 +34,7 @@ export function useAddToQueue() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (text: string) =>
-      request<{ added: number; skipped: number }>("/api/queue", {
+      request<{ added: number; skipped: number; duplicates: number }>("/api/queue", {
         method: "POST",
         body: JSON.stringify({ text }),
       }),

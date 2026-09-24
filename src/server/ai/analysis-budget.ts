@@ -6,36 +6,38 @@ import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 
 /**
- * The per-business-day AI budget — the SINGLE place the analysis limit is
- * decided. Every path that can invoke the model (the import queue's Analyze
- * stage, Auto Import, Process All, and the manual single-import flow) uses the
- * same two steps: {@link assertAiInvocationAllowed} before the call, and
- * {@link recordSuccessfulAnalysis} after it SUCCEEDS. So there is one rule and
- * one counter rather than a check per entry point.
+ * Record of finished ANALYSES — which boutiques the model actually profiled.
  *
- * The counter is `ImportJob.analyzedAt`, stamped only once the model returned a
- * usable result. A transient failure (a 503 blip, a timeout, a 429) therefore
- * costs NO daily slot: the day's allowance is spent on analyses that actually
- * produced something, not on requests that errored out.
+ * `ImportJob.analyzedAt` is stamped only once the model returned a usable
+ * result, together with `analyzedBy`. A transient failure (a 503 blip, a
+ * timeout, a 429) leaves no stamp, because nothing was analyzed.
  *
- * (This reverses the earlier "count every invocation" rule. That rule was meant
- * to protect the provider's free-tier quota, but it never tracked it accurately
- * — retries make one invocation several HTTP requests — and in practice it let
- * a flaky provider burn the whole day's budget on failures. Counting successes
- * keeps the limit tied to the thing it exists to ration: finished analyses.)
+ * This is NOT the provider's quota counter, and the difference matters. Google
+ * charges for REQUESTS, failures included; one analysis can cost several of
+ * them through retries, and a bad day can spend fifty requests to produce five
+ * analyses. A gate built on this number therefore reads far too low and keeps
+ * sending requests long after the allowance is gone — which is exactly what
+ * happened in production. Requests are counted in their own ledger
+ * (`server/ai/request-ledger.ts`), and that is what gates the pool.
  *
- * This is deliberately separate from the Telegram publication limit: one caps
- * AI spend, the other caps how much is posted, and neither constrains the other.
+ * So: this module answers "what did we analyze today"; the ledger answers "how
+ * much allowance is left". Both are needed, and neither can do the other's job.
+ *
+ * This is also separate from the Telegram publication limit: one caps AI spend,
+ * the other caps how much is posted, and neither constrains the other.
  */
 
-/** Raised when a call is refused because today's AI allowance is spent. */
+/**
+ * Raised when a call is refused because today's AI allowance is spent. `used`
+ * and `limit` are REQUESTS when the pool raises it (see NoProviderAvailableError).
+ */
 export class DailyAnalysisLimitError extends Error {
   readonly used: number;
   readonly limit: number;
 
   constructor(used: number, limit: number) {
     super(
-      `Daily analysis limit reached (${used}/${limit} successful analyses today). ` +
+      `Daily AI limit reached (${used}/${limit} used today). ` +
         `Remaining work resumes on the next business day.`,
     );
     this.name = "DailyAnalysisLimitError";
@@ -71,8 +73,10 @@ export interface AnalysisBudget {
 }
 
 /**
- * Today's budget, for callers that must react without throwing — the queue
- * reports "limit reached" as a stop signal rather than as a failed item.
+ * Today's analysis count against the configured limit.
+ *
+ * NOT the provider gate — the pool gates on the request ledger, which counts
+ * what Google counts. Kept for reporting and for a single-provider setup.
  */
 export async function checkDailyAnalysisBudget(now: Date = new Date()): Promise<AnalysisBudget> {
   const [used, limit] = [await countAnalysesToday(now), dailyAnalysisLimit()];
@@ -80,11 +84,12 @@ export async function checkDailyAnalysisBudget(now: Date = new Date()): Promise<
 }
 
 /**
- * Throws {@link DailyAnalysisLimitError} when today's allowance is spent.
+ * Throws {@link DailyAnalysisLimitError} when today's analysis count is spent.
  *
- * Callers use this to bail out EARLY — before scraping or mutating anything —
- * so a refused import costs no Apify credit and leaves no half-finished row.
- * A disabled provider issues no request, so it is never budgeted.
+ * Superseded as the pool's gate by `assertProviderAvailable`, which reads the
+ * request ledger. Kept for callers that ration finished analyses rather than
+ * provider quota. A disabled provider issues no request, so it is never
+ * budgeted.
  */
 export async function assertAiInvocationAllowed(
   providerName: string,

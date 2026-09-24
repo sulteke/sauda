@@ -4,6 +4,7 @@ import {
   geminiFallbackDailyLimit,
   geminiPrimaryDailyLimit,
   providerCooldownMs,
+  rateLimitCooldownMs,
 } from "@/config/limits";
 import {
   type AiCategoryProvider,
@@ -12,12 +13,12 @@ import {
   type AiCategoryResult,
   disabledAiCategoryProvider,
 } from "@/lib/ai-category-provider";
-import { startOfBusinessDay } from "@/lib/business-day";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 
 import { DailyAnalysisLimitError } from "./analysis-budget";
 import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
+import { exhaustBucket, ledgerUsage, reserveRequest } from "./request-ledger";
 
 /**
  * Provider pool — the ONE place that decides which AI provider runs, and what
@@ -68,7 +69,9 @@ export interface PooledProvider {
   id: string;
   /** Google Cloud project this key belongs to (quota is per project). */
   projectId: string | null;
-  /** Successful analyses per business day allowed on this project. */
+  /** Model this entry sends to; the quota bucket is project + model. */
+  model: string;
+  /** AI REQUESTS per quota day allowed on this project. */
   dailyLimit: number;
   provider: AiCategoryProvider;
 }
@@ -76,6 +79,8 @@ export interface PooledProvider {
 export interface ProviderUsage {
   id: string;
   projectId: string | null;
+  model: string;
+  /** Requests SENT today — retries and failures included. */
   used: number;
   limit: number;
   /** Null when healthy; otherwise the moment it becomes usable again. */
@@ -100,7 +105,9 @@ export class NoProviderAvailableError extends DailyAnalysisLimitError {
     this.name = "NoProviderAvailableError";
     this.usage = usage;
     const detail = usage
-      .map((u) => `${u.id} ${u.used}/${u.limit}${u.cooldownUntil ? " (cooling down)" : ""}`)
+      .map(
+        (u) => `${u.id} ${u.used}/${u.limit} requests${u.cooldownUntil ? " (cooling down)" : ""}`,
+      )
       .join(", ");
     this.message = `No AI provider available right now — ${detail}.`;
   }
@@ -140,7 +147,11 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   const primaryProject = process.env.GEMINI_PRIMARY_PROJECT_ID || null;
   const fallbackProject = process.env.GEMINI_FALLBACK_PROJECT_ID || null;
 
+  const model = process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL;
   const providers: PooledProvider[] = [];
+
+  /** Each attempt takes a ledger slot before it is allowed to go out. */
+  const reserve = (id: string, limit: number) => () => reserveRequest(id, model, limit);
   // Each project retries its own transient faults before we give up on it. A
   // 503 means the MODEL is busy, not that the project is unwell, so switching
   // projects lands on the same busy model a second later — and parks both. The
@@ -151,11 +162,16 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: POOLED_MAX_ATTEMPTS };
 
   if (primaryKey) {
+    const dailyLimit = geminiPrimaryDailyLimit();
     providers.push({
       id: PRIMARY_PROVIDER_ID,
       projectId: primaryProject,
-      dailyLimit: geminiPrimaryDailyLimit(),
-      provider: new GeminiCategoryProvider(primaryKey, shared),
+      model,
+      dailyLimit,
+      provider: new GeminiCategoryProvider(primaryKey, {
+        ...shared,
+        beforeRequest: reserve(PRIMARY_PROVIDER_ID, dailyLimit),
+      }),
     });
   }
 
@@ -176,11 +192,16 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
           "Fallback disabled — put the fallback key in a separate Google Cloud project.",
       });
     } else {
+      const dailyLimit = geminiFallbackDailyLimit();
       providers.push({
         id: FALLBACK_PROVIDER_ID,
         projectId: fallbackProject,
-        dailyLimit: geminiFallbackDailyLimit(),
-        provider: new GeminiCategoryProvider(fallbackKey, shared),
+        model,
+        dailyLimit,
+        provider: new GeminiCategoryProvider(fallbackKey, {
+          ...shared,
+          beforeRequest: reserve(FALLBACK_PROVIDER_ID, dailyLimit),
+        }),
       });
     }
   }
@@ -202,10 +223,10 @@ async function readCooldowns(ids: string[]): Promise<Map<string, Date | null>> {
  */
 export async function markProviderCooldown(
   providerId: string,
-  reason: { status?: number; error: string },
+  reason: { status?: number; error: string; durationMs?: number },
   now: Date = new Date(),
 ): Promise<Date> {
-  const cooldownUntil = new Date(now.getTime() + providerCooldownMs());
+  const cooldownUntil = new Date(now.getTime() + (reason.durationMs ?? providerCooldownMs()));
   const data = {
     cooldownUntil,
     lastStatus: reason.status ?? null,
@@ -231,25 +252,28 @@ export async function providerUsage(
   now: Date = new Date(),
 ): Promise<ProviderUsage[]> {
   const cooldowns = await readCooldowns(providers.map((p) => p.id));
-  const dayStart = startOfBusinessDay(now);
-
-  return Promise.all(
-    providers.map(async (entry) => {
-      const used = await prisma.importJob.count({
-        where: { analyzedAt: { gte: dayStart }, analyzedBy: entry.id },
-      });
-      const raw = cooldowns.get(entry.id) ?? null;
-      const cooldownUntil = raw && raw.getTime() > now.getTime() ? raw : null;
-      return {
-        id: entry.id,
-        projectId: entry.projectId,
-        used,
-        limit: entry.dailyLimit,
-        cooldownUntil,
-        available: used < entry.dailyLimit && cooldownUntil === null,
-      };
-    }),
+  // Requests SENT, from the ledger — not finished analyses. Google's allowance
+  // counts every request, so a counter built on successes reads far too low.
+  const ledger = await ledgerUsage(
+    providers.map((p) => ({ provider: p.id, model: p.model, limit: p.dailyLimit })),
+    now,
   );
+  const usedById = new Map(ledger.map((row) => [row.provider, row.used]));
+
+  return providers.map((entry) => {
+    const used = usedById.get(entry.id) ?? 0;
+    const raw = cooldowns.get(entry.id) ?? null;
+    const cooldownUntil = raw && raw.getTime() > now.getTime() ? raw : null;
+    return {
+      id: entry.id,
+      projectId: entry.projectId,
+      model: entry.model,
+      used,
+      limit: entry.dailyLimit,
+      cooldownUntil,
+      available: used < entry.dailyLimit && cooldownUntil === null,
+    };
+  });
 }
 
 /** Whether any provider could run right now. Used by the queue's pre-check. */
@@ -383,7 +407,29 @@ export async function analyzeWithPool(
         throw error;
       }
 
-      await markProviderCooldown(entry.id, { status, error: message });
+      const quotaScope =
+        error instanceof AiCategoryProviderError ? error.quotaScope : undefined;
+
+      if (quotaScope === "per-day") {
+        // The project's own count is authoritative and is ahead of ours. Spend
+        // the rest of its ledger so no further request is sent today, and skip
+        // the cooldown — a ten-minute wait cannot bring back a spent day.
+        await exhaustBucket(entry.id, entry.model, entry.dailyLimit);
+        logger.warn("ai.pool.daily_quota_gone", {
+          ...context,
+          provider: entry.id,
+          model: entry.model,
+          error: message,
+        });
+      } else {
+        // A per-minute bounce clears in seconds; parking the project for ten
+        // minutes would throw away an allowance that is still there.
+        await markProviderCooldown(entry.id, {
+          status,
+          error: message,
+          ...(quotaScope === "per-minute" ? { durationMs: rateLimitCooldownMs() } : {}),
+        });
+      }
     }
   }
 

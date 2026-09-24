@@ -33,7 +33,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
 const FAILED_STATUSES: ImportQueueStatus[] = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"];
 /** Terminal quality outcome — neither a success nor a failure, so counted apart. */
-const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS"];
+const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS", "SKIPPED_DUPLICATE"];
 // Items still needing work — used only for the initial progress denominator.
 const ACTIONABLE_STATUSES: ImportQueueStatus[] = [
   "PENDING_PARSE",

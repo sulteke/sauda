@@ -22,24 +22,75 @@ function toDTO(row: ImportQueue): ImportQueueItemDTO {
   };
 }
 
+/**
+ * Boutiques already imported for these handles, as a LOWERCASE set.
+ *
+ * Instagram treats handles case-insensitively — @Qoima and @qoima are one
+ * account — but `Boutique.instagramHandle` is a plain unique column, so a
+ * case-sensitive lookup would happily let the same shop in twice. Every
+ * comparison here therefore goes through lower case, and the query itself asks
+ * Postgres for an insensitive match rather than trusting how the handle
+ * happened to be stored.
+ */
+async function existingBoutiqueHandles(handles: readonly string[]): Promise<Set<string>> {
+  if (handles.length === 0) return new Set();
+  const rows = await prisma.boutique.findMany({
+    // One OR per handle, each insensitive — `in` does not honour `mode`.
+    where: { OR: handles.map((handle) => ({ instagramHandle: { equals: handle, mode: "insensitive" as const } })) },
+    select: { instagramHandle: true },
+  });
+  return new Set(
+    rows
+      .map((row) => row.instagramHandle?.toLowerCase())
+      .filter((handle): handle is string => Boolean(handle)),
+  );
+}
+
+/**
+ * Whether this Instagram handle already has a boutique — ANY status counts.
+ *
+ * APPROVED, REJECTED and DRAFT all mean the same thing here: the profile has
+ * been through the pipeline once and a decision about it already exists.
+ * Scraping and analyzing it again would spend Apify and Gemini to re-learn
+ * something the database already knows.
+ */
+async function boutiqueExistsForHandle(handle: string): Promise<boolean> {
+  const existing = await prisma.boutique.findFirst({
+    where: { instagramHandle: { equals: handle, mode: "insensitive" } },
+    select: { id: true },
+  });
+  return existing !== null;
+}
+
 /** Parses pasted text (one URL per line) and queues the valid Instagram URLs. */
-export async function addUrlsToQueue(text: string): Promise<{ added: number; skipped: number }> {
+export async function addUrlsToQueue(
+  text: string,
+): Promise<{ added: number; skipped: number; duplicates: number }> {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
   const unique = Array.from(new Set(lines));
-  const valid = unique.filter((url) => parseInstagramHandle(url) !== null);
-  const skipped = unique.length - valid.length;
+  const parsed = unique
+    .map((url) => ({ url, handle: parseInstagramHandle(url) }))
+    .filter((entry): entry is { url: string; handle: string } => entry.handle !== null);
+  const skipped = unique.length - parsed.length;
 
-  if (valid.length > 0) {
+  // Keep already-imported profiles out of the queue entirely, so the run is not
+  // padded with work that would only be skipped later.
+  const alreadyImported = await existingBoutiqueHandles(parsed.map((entry) => entry.handle));
+  const fresh = parsed.filter((entry) => !alreadyImported.has(entry.handle.toLowerCase()));
+  const duplicates = parsed.length - fresh.length;
+
+  if (fresh.length > 0) {
     await prisma.importQueue.createMany({
-      data: valid.map((instagramUrl) => ({ instagramUrl })),
+      data: fresh.map((entry) => ({ instagramUrl: entry.url })),
     });
   }
 
-  return { added: valid.length, skipped };
+  logger.info("queue.urls_added", { added: fresh.length, skipped, duplicates });
+  return { added: fresh.length, skipped, duplicates };
 }
 
 export async function listQueue(): Promise<ImportQueueItemDTO[]> {
@@ -64,9 +115,9 @@ export async function deleteQueueItem(id: string): Promise<{ deleted: number }> 
 /** Statuses that represent a fully-imported boutique (new + legacy). */
 const SUCCESS_STATUSES = ["READY_FOR_REVIEW", "COMPLETED"] as const;
 /**
- * Stage-scoped + legacy failure statuses. SKIPPED_LOW_FOLLOWERS is deliberately
- * NOT here: it is a quality decision, not a failure, so "Clear Failed" leaves it
- * alone and the retry path refuses it.
+ * Stage-scoped + legacy failure statuses. The SKIPPED_* statuses are
+ * deliberately NOT here: they are decisions, not failures, so "Clear Failed"
+ * leaves them alone and the retry path refuses them.
  */
 const FAILED_STATUSES = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"] as const;
 /** Statuses with work still to do (not yet complete, not failed). */
@@ -260,6 +311,29 @@ export async function processNextImport(): Promise<ProcessResult> {
  */
 async function runParseStage(id: string, instagramUrl: string): Promise<ProcessResult> {
   logger.info("queue.parse_selected", { id, instagramUrl });
+
+  // Second duplicate check, and the one that actually guards the spend: a
+  // boutique may have appeared between queueing and now (another run, a manual
+  // import), and the add-time filter cannot know about that. Checked BEFORE the
+  // PARSING transition so a duplicate costs no Apify call and no Gemini call.
+  const handle = parseInstagramHandle(instagramUrl);
+  if (handle && (await boutiqueExistsForHandle(handle))) {
+    const message = `Skipped: @${handle} is already imported.`;
+    const updated = await prisma.importQueue.update({
+      where: { id },
+      data: { status: "SKIPPED_DUPLICATE", error: message },
+    });
+    const remaining = await countRemaining();
+    logger.info("queue.parse_skipped", {
+      id,
+      instagramUrl,
+      handle,
+      status: "SKIPPED_DUPLICATE",
+      remaining,
+    });
+    return { processed: true, item: toDTO(updated), remaining };
+  }
+
   await prisma.importQueue.update({ where: { id }, data: { status: "PARSING" } });
   const startedAt = Date.now();
 

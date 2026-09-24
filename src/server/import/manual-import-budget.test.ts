@@ -126,7 +126,7 @@ describe("manual /import path (runDiscovery) shares the daily AI budget", () => 
     assertProviderAvailable.mockRejectedValue(new DailyAnalysisLimitError(20, 20));
 
     await expect(runDiscovery("job-1")).rejects.toMatchObject({ used: 20, limit: 20 });
-    await expect(runDiscovery("job-1")).rejects.toThrow(/Daily analysis limit reached \(20\/20/);
+    await expect(runDiscovery("job-1")).rejects.toThrow(/Daily AI limit reached \(20\/20/);
   });
 });
 

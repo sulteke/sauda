@@ -55,16 +55,39 @@ export function dailyTelegramPublishLimit(): number {
 // be, and the two need not match.
 
 export const DEFAULT_PROVIDER_DAILY_LIMIT = 20;
+/**
+ * Where the provider's daily allowance rolls over. Google's free-tier RPD
+ * resets at midnight Pacific, roughly twelve hours away from the Almaty
+ * business day, so counting requests on the business day would leave our
+ * ledger permanently half a day out of step with the quota it is tracking.
+ * Override: GEMINI_QUOTA_RESET_TZ.
+ */
+export const DEFAULT_QUOTA_RESET_TIME_ZONE = "America/Los_Angeles";
 export const DEFAULT_PROVIDER_COOLDOWN_MINUTES = 10;
 
-/** Successful analyses per business day allowed on the PRIMARY project. */
+/** AI REQUESTS per quota day allowed on the PRIMARY project. */
 export function geminiPrimaryDailyLimit(): number {
   return positiveInt(process.env.GEMINI_PRIMARY_DAILY_LIMIT, DEFAULT_PROVIDER_DAILY_LIMIT);
 }
 
-/** Successful analyses per business day allowed on the FALLBACK project. */
+/** AI REQUESTS per quota day allowed on the FALLBACK project. */
 export function geminiFallbackDailyLimit(): number {
   return positiveInt(process.env.GEMINI_FALLBACK_DAILY_LIMIT, DEFAULT_PROVIDER_DAILY_LIMIT);
+}
+
+/** Time zone whose midnight rolls the provider's request allowance over. */
+export function quotaResetTimeZone(): string {
+  return process.env.GEMINI_QUOTA_RESET_TZ || DEFAULT_QUOTA_RESET_TIME_ZONE;
+}
+
+/**
+ * How long a project is skipped after a per-MINUTE rate limit. Short by design:
+ * an RPM bounce clears in well under a minute, and parking the project for ten
+ * would waste an allowance that is still there. Override:
+ * GEMINI_RATE_LIMIT_COOLDOWN_SECONDS.
+ */
+export function rateLimitCooldownMs(): number {
+  return positiveInt(process.env.GEMINI_RATE_LIMIT_COOLDOWN_SECONDS, 60) * 1_000;
 }
 
 /**

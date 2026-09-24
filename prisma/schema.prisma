@@ -226,6 +226,11 @@ enum ImportQueueStatus {
   /// Terminal: below the follower quality gate (or follower count unavailable),
   /// so Gemini was never called. NOT a failure and never retried for analysis.
   SKIPPED_LOW_FOLLOWERS
+  /// Terminal: a boutique already exists for this Instagram handle, so the
+  /// profile was NOT scraped and NOT analyzed. Neither Apify nor Gemini was
+  /// called — re-importing something already imported buys nothing and costs
+  /// both. NOT a failure and never retried.
+  SKIPPED_DUPLICATE
   // Legacy (pre two-stage split) — kept for backward compatibility only.
   PENDING
   PROCESSING
@@ -350,6 +355,32 @@ model GisStore {
 /// instance, so the cooldown lives here.
 ///
 /// One row per provider id ("primary" / "fallback"). Absent row = healthy.
+/// Requests actually SENT to an AI provider, per project + model, per quota day.
+///
+/// Separate from `ImportJob.analyzedAt` on purpose. That field records finished
+/// ANALYSES and must keep counting only successes, because it says which
+/// boutiques were analyzed. This table records HTTP REQUESTS — retries and
+/// failures included — because that is what the provider's own daily quota
+/// counts, and the two numbers are genuinely different: a day can spend fifty
+/// requests and produce five analyses.
+///
+/// `day` follows the PROVIDER's quota reset timezone, not the business day, so
+/// the row rolls over when Google's allowance does.
+model AiRequestLedger {
+  /// Stable provider id — "primary" or "fallback".
+  provider  String
+  /// Model the request was sent to; quota is per project AND per model.
+  model     String
+  /// Provider quota day as YYYY-MM-DD (see GEMINI_QUOTA_RESET_TZ).
+  day       String
+  /// HTTP requests sent for this provider+model on this day.
+  used      Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([provider, model, day])
+  @@map("ai_request_ledger")
+}
+
 model AiProviderCooldown {
   /// Stable provider id — "primary" or "fallback".
   provider      String    @id

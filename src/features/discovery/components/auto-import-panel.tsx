@@ -33,8 +33,8 @@ const MAX_CONSECUTIVE_PAUSES = 3;
 // Terminal import-queue outcomes for one item (new + legacy statuses).
 const SUCCESS_STATUSES: ImportQueueStatus[] = ["READY_FOR_REVIEW", "COMPLETED"];
 const FAILED_STATUSES: ImportQueueStatus[] = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"];
-/** Below the follower quality gate — no AI was spent, so it is not a failure. */
-const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS"];
+/** Decisions, not failures: too few followers, or already imported. No AI spent. */
+const SKIPPED_STATUSES: ImportQueueStatus[] = ["SKIPPED_LOW_FOLLOWERS", "SKIPPED_DUPLICATE"];
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

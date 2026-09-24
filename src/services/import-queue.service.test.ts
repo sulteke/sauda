@@ -18,6 +18,13 @@ const { jobFindUnique, jobCount } = vi.hoisted(() => ({
   jobCount: vi.fn(),
 }));
 
+/** Boutique reads: the duplicate guard, which must run before any scrape. */
+const { boutiqueFindFirst, boutiqueFindMany, queueCreateMany } = vi.hoisted(() => ({
+  boutiqueFindFirst: vi.fn(),
+  boutiqueFindMany: vi.fn(),
+  queueCreateMany: vi.fn(),
+}));
+
 const { parseInstagramProfile, analyzeImportJob } = vi.hoisted(() => ({
   parseInstagramProfile: vi.fn(),
   analyzeImportJob: vi.fn(),
@@ -25,8 +32,18 @@ const { parseInstagramProfile, analyzeImportJob } = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    importQueue: { findFirst, findUnique, findMany, update, updateMany, deleteMany, count },
+    importQueue: {
+      findFirst,
+      findUnique,
+      findMany,
+      update,
+      updateMany,
+      deleteMany,
+      count,
+      createMany: queueCreateMany,
+    },
     importJob: { findUnique: jobFindUnique, count: jobCount },
+    boutique: { findFirst: boutiqueFindFirst, findMany: boutiqueFindMany },
   },
 }));
 
@@ -38,6 +55,7 @@ const { anyProviderAvailable } = vi.hoisted(() => ({ anyProviderAvailable: vi.fn
 vi.mock("@/server/ai/ai-provider-pool", () => ({ anyProviderAvailable }));
 
 import {
+  addUrlsToQueue,
   clearQueue,
   deleteQueueItem,
   processNextImport,
@@ -56,9 +74,15 @@ function resetAll() {
     count,
     jobFindUnique,
     jobCount,
+    boutiqueFindFirst,
+    boutiqueFindMany,
+    queueCreateMany,
   ]) {
     fn.mockReset();
   }
+  // Default: nothing imported yet, so the duplicate guard lets work through.
+  boutiqueFindFirst.mockResolvedValue(null);
+  boutiqueFindMany.mockResolvedValue([]);
   parseInstagramProfile.mockReset();
   analyzeImportJob.mockReset();
   // Default: no stale jobs, nothing to promote, queue drained.
@@ -590,5 +614,191 @@ describe("clearQueue", () => {
     const result = await clearQueue("ALL");
     expect(deleteMany).toHaveBeenCalledWith({ where: {} });
     expect(result).toEqual({ deleted: 9 });
+  });
+});
+
+/**
+ * Re-importing a profile we already hold buys nothing and costs both Apify and
+ * Gemini. The guard runs twice — once when URLs are pasted, once again right
+ * before the scrape, because a boutique can appear in between.
+ */
+describe("duplicate protection", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  /** Queue a single PENDING_PARSE row for `url`. */
+  function pendingParse(url: string) {
+    findFirst
+      .mockResolvedValueOnce(null) // nothing pending analysis
+      .mockResolvedValueOnce({ id: "p1", instagramUrl: url, importJobId: null });
+    count.mockResolvedValue(0);
+    update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+      Promise.resolve({
+        id: "p1",
+        instagramUrl: url,
+        status: data.status,
+        error: data.error ?? null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }),
+    );
+  }
+
+  it("marks an already-imported handle SKIPPED_DUPLICATE", async () => {
+    pendingParse("https://instagram.com/qoima");
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" });
+
+    const result = await processNextImport();
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "p1" },
+      data: { status: "SKIPPED_DUPLICATE", error: "Skipped: @qoima is already imported." },
+    });
+    expect(result.item?.status).toBe("SKIPPED_DUPLICATE");
+    // Not a failure: the run carries on to the next item.
+    expect(result.processed).toBe(true);
+  });
+
+  it("spends NO Apify call on a duplicate", async () => {
+    pendingParse("https://instagram.com/qoima");
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" });
+
+    await processNextImport();
+
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+  });
+
+  it("spends NO Gemini call on a duplicate", async () => {
+    pendingParse("https://instagram.com/qoima");
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" });
+
+    await processNextImport();
+
+    expect(analyzeImportJob).not.toHaveBeenCalled();
+  });
+
+  it("never even marks it PARSING — the check runs before the scrape begins", async () => {
+    pendingParse("https://instagram.com/qoima");
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" });
+
+    await processNextImport();
+
+    const statuses = update.mock.calls.map((c) => (c[0] as { data: { status: string } }).data.status);
+    expect(statuses).not.toContain("PARSING");
+  });
+
+  it("parses normally when the handle is NOT already imported", async () => {
+    pendingParse("https://instagram.com/newshop");
+    boutiqueFindFirst.mockResolvedValue(null);
+    parseInstagramProfile.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
+
+    await processNextImport();
+
+    expect(parseInstagramProfile).toHaveBeenCalledWith({
+      url: "https://instagram.com/newshop",
+      userId: null,
+    });
+  });
+
+  it("asks Postgres for a CASE-INSENSITIVE match, so @Qoima and @qoima are one shop", async () => {
+    // The URL side is already lower-cased by parseInstagramHandle; the STORED
+    // side is whatever Apify returned, so the insensitivity has to come from
+    // the query or a shop saved as "Qoima" would be imported twice.
+    pendingParse("https://instagram.com/Qoima");
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" });
+
+    await processNextImport();
+
+    expect(boutiqueFindFirst).toHaveBeenCalledWith({
+      where: { instagramHandle: { equals: "qoima", mode: "insensitive" } },
+      select: { id: true },
+    });
+  });
+
+  it.each(["APPROVED", "REJECTED", "DRAFT", "NEEDS_REVIEW", "PUBLISHED"])(
+    "treats an existing %s boutique as a duplicate",
+    async (status) => {
+      // Any status means a decision already exists for this profile.
+      pendingParse("https://instagram.com/qoima");
+      boutiqueFindFirst.mockResolvedValue({ id: `b-${status}` });
+
+      const result = await processNextImport();
+
+      expect(result.item?.status).toBe("SKIPPED_DUPLICATE");
+      expect(parseInstagramProfile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("blocks a duplicate that appeared AFTER the URL was queued", async () => {
+    // The add-time filter saw nothing; by the time the item is picked up the
+    // boutique exists. Only this second check can stop the Apify call.
+    pendingParse("https://instagram.com/qoima");
+    boutiqueFindMany.mockResolvedValue([]); // add-time filter found nothing
+    boutiqueFindFirst.mockResolvedValue({ id: "b1" }); // but now it exists
+
+    const result = await processNextImport();
+
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(result.item?.status).toBe("SKIPPED_DUPLICATE");
+  });
+});
+
+describe("addUrlsToQueue duplicate filter", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("counts added, invalid and already-imported separately", async () => {
+    boutiqueFindMany.mockResolvedValue([{ instagramHandle: "qoima" }]);
+
+    const result = await addUrlsToQueue(
+      ["https://instagram.com/qoima", "https://instagram.com/newshop", "not-a-url"].join("\n"),
+    );
+
+    expect(result).toEqual({ added: 1, skipped: 1, duplicates: 1 });
+  });
+
+  it("queues ONLY the fresh URL", async () => {
+    boutiqueFindMany.mockResolvedValue([{ instagramHandle: "qoima" }]);
+
+    await addUrlsToQueue(["https://instagram.com/qoima", "https://instagram.com/newshop"].join("\n"));
+
+    expect(queueCreateMany).toHaveBeenCalledWith({
+      data: [{ instagramUrl: "https://instagram.com/newshop" }],
+    });
+  });
+
+  it("matches regardless of case — stored @Qoima blocks pasted @QOIMA", async () => {
+    boutiqueFindMany.mockResolvedValue([{ instagramHandle: "Qoima" }]);
+
+    const result = await addUrlsToQueue("https://instagram.com/QOIMA");
+
+    expect(result.duplicates).toBe(1);
+    expect(queueCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("asks for every handle case-insensitively", async () => {
+    boutiqueFindMany.mockResolvedValue([]);
+
+    await addUrlsToQueue("https://instagram.com/Qoima");
+
+    expect(boutiqueFindMany).toHaveBeenCalledWith({
+      where: { OR: [{ instagramHandle: { equals: "qoima", mode: "insensitive" } }] },
+      select: { instagramHandle: true },
+    });
+  });
+
+  it("does not query at all when nothing valid was pasted", async () => {
+    const result = await addUrlsToQueue("not-a-url\nalso-not-a-url");
+
+    expect(result).toEqual({ added: 0, skipped: 2, duplicates: 0 });
+    expect(boutiqueFindMany).not.toHaveBeenCalled();
+    expect(queueCreateMany).not.toHaveBeenCalled();
   });
 });
