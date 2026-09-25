@@ -859,6 +859,48 @@ describe("batch analysis", () => {
       importJobId: `job-${i}`,
     }));
 
+  it("does NOT analyze a lone pending item while more are still unparsed", async () => {
+    // One ready to analyze, but parsing is not done — hold, and parse instead.
+    pendingAnalysis([{ id: "q0", instagramUrl: "https://instagram.com/s0", importJobId: "job-0" }]);
+    count.mockImplementation(({ where }: { where: { status?: unknown } }) =>
+      // PENDING_PARSE still has rows → keep filling the batch.
+      Promise.resolve(where.status === "PENDING_PARSE" ? 5 : 0),
+    );
+    findFirst.mockResolvedValue({ id: "p9", instagramUrl: "https://instagram.com/p9", importJobId: null });
+    parseInstagramProfile.mockResolvedValue({ job: { id: "job-9" }, boutiqueId: "b9" });
+
+    await processNextImport();
+
+    // It parsed instead of analyzing the single pending item.
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
+    expect(parseInstagramProfile).toHaveBeenCalled();
+  });
+
+  it("flushes a partial batch once parsing is finished", async () => {
+    // Two ready, nothing left to parse → analyze the partial batch now.
+    pendingAnalysis([
+      { id: "q0", instagramUrl: "https://instagram.com/s0", importJobId: "job-0" },
+      { id: "q1", instagramUrl: "https://instagram.com/s1", importJobId: "job-1" },
+    ]);
+    count.mockResolvedValue(0); // no PENDING_PARSE
+
+    await processNextImport();
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    const [items] = analyzeBatchWithPool.mock.calls[0] as [{ handle: string }[]];
+    expect(items).toHaveLength(2);
+  });
+
+  it("analyzes immediately when a FULL batch is ready, even with parsing left", async () => {
+    pendingAnalysis(rows(3));
+    count.mockResolvedValue(9); // plenty still to parse, but the batch is full
+
+    await processNextImport();
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+  });
+
   it("sends THREE shops in ONE model request", async () => {
     pendingAnalysis(rows(3));
 

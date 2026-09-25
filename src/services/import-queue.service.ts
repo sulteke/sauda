@@ -276,15 +276,30 @@ export async function retryQueueItem(id: string): Promise<ImportQueueItemDTO> {
 export async function processNextImport(): Promise<ProcessResult> {
   await requeueStaleJobs();
 
-  // Stage 2 first — drain analysis, a batch at a time so one model request
-  // covers several shops.
+  // Analysis is a BATCH stage: one model request covers up to `batchSize`
+  // shops, and that is the whole point. So it must not fire on the first
+  // pending item — if it did, the browser loop's parse↔analyze alternation
+  // would hand it one shop at a time and every "batch" would be a batch of one.
+  //
+  // Hold analysis until a full batch has accumulated. The single exception is
+  // when nothing is left to parse: a leftover of one or two would otherwise
+  // wait forever, so it is flushed.
+  const batchSize = analysisBatchSize();
   const analyzeRows = await prisma.importQueue.findMany({
     where: { status: "PENDING_ANALYSIS" },
     orderBy: { createdAt: "asc" },
-    take: analysisBatchSize(),
+    take: batchSize,
     select: { id: true, instagramUrl: true, importJobId: true },
   });
-  if (analyzeRows.length > 0) return runAnalyzeBatchStage(analyzeRows);
+  if (analyzeRows.length > 0) {
+    const full = analyzeRows.length >= batchSize;
+    // Count ONLY what the parse stage below will actually pick up. Falling
+    // through to parse when nothing is PENDING_PARSE would report "queue done"
+    // and strand the items we are holding, so the two must agree.
+    const unparsed = await prisma.importQueue.count({ where: { status: "PENDING_PARSE" } });
+    if (full || unparsed === 0) return runAnalyzeBatchStage(analyzeRows);
+    // Otherwise fall through and parse the next profile, letting the batch fill.
+  }
 
   // Stage 1 — start the next parse, unless today's AI allowance is already gone.
   // Scraping more profiles now would only pile up work that cannot be analyzed
