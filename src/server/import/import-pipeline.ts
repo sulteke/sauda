@@ -2,13 +2,19 @@ import "server-only";
 
 import { type Boutique, Prisma, type ImportJob } from "@prisma/client";
 
-import { disabledAiCategoryProvider } from "@/lib/ai-category-provider";
+import {
+  type AiCategoryResult,
+  disabledAiCategoryProvider,
+} from "@/lib/ai-category-provider";
 import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
   EMPTY_OVERRIDES,
   type HybridDetectionResult,
   mergeCategories,
+  completeDetection,
+  type PreparedDetection,
+  prepareDetection,
   runHybridDetection,
 } from "@/lib/category-pipeline";
 import { completeHashtags } from "@/lib/hashtag-derivation";
@@ -472,4 +478,103 @@ export async function runAnalyze(jobId: string): Promise<{ job: ImportJob; bouti
     });
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Batch analysis support
+//
+// The single-shop path calls the model in the middle of runAnalyze. A batch
+// cannot: the call covers several jobs at once, so the work either side of it
+// has to be reachable separately. These three functions are that split — the
+// preparation, the success path and the failure path — and they do exactly what
+// runAnalyze does, so a batched import lands identical rows to a single one.
+
+/** One job, ready to go into a batch: its profile and its prepared request. */
+export interface PreparedAnalysisJob {
+  jobId: string;
+  /** Instagram handle — the key the model answers under. */
+  handle: string;
+  rawProfile: RawInstagramProfile;
+  prepared: PreparedDetection;
+}
+
+/**
+ * Loads a parsed job and runs everything that happens BEFORE the model call.
+ * Throws when the job was never parsed — the same condition runAnalyze rejects.
+ */
+export async function prepareAnalysisJob(jobId: string): Promise<PreparedAnalysisJob> {
+  const job = await prisma.importJob.findUniqueOrThrow({ where: { id: jobId } });
+  const rawProfile = job.rawProfile as unknown as RawInstagramProfile | null;
+  if (!rawProfile) {
+    throw new ImportStateError("Import job has not been parsed yet (no raw profile to analyze).");
+  }
+
+  const handle = (job.handle ?? rawProfile.handle ?? "").trim();
+  if (!handle) {
+    throw new ImportStateError("Import job has no Instagram handle to key a batch result on.");
+  }
+
+  const enrichment = enrichBoutique({
+    biography: rawProfile.biography,
+    externalUrl: rawProfile.externalUrl,
+    externalUrls: rawProfile.externalUrls,
+    businessAddress: rawProfile.businessAddress,
+  });
+
+  return {
+    jobId,
+    handle,
+    rawProfile,
+    prepared: prepareDetection(toDetectionInput(rawProfile), { enrichment }),
+  };
+}
+
+/**
+ * Applies a model result to one job: merges it with the keyword stage, writes
+ * the boutique, stamps the analysis and completes the job.
+ *
+ * Called ONLY for a shop the model actually answered for, and only after the
+ * whole batch reply validated — so `analyzedAt`/`analyzedBy` still mean what
+ * they have always meant.
+ */
+export async function applyAnalysisResult(
+  job: PreparedAnalysisJob,
+  ai: AiCategoryResult,
+  providerId: string,
+): Promise<{ boutiqueId: string }> {
+  const detection = completeDetection(job.prepared, ai);
+  await recordSuccessfulAnalysis(job.jobId, "gemini", providerId);
+
+  const preview = mapProfileToPreview(job.rawProfile, detection, job.prepared.enrichment, true);
+  const boutique = await upsertBoutiqueFromPreview(preview);
+
+  await prisma.importJob.update({
+    where: { id: job.jobId },
+    data: {
+      status: "COMPLETED",
+      preview: preview as unknown as Prisma.InputJsonValue,
+      boutiqueId: boutique.id,
+      error: null,
+    },
+  });
+
+  logger.info("import.analyze_metrics", {
+    handle: job.handle,
+    aiProvider: "gemini",
+    providerId,
+    path: "batch",
+    categories: detection.autoDetected.length,
+    hashtags: preview.hashtags?.length ?? 0,
+    status: "READY_FOR_REVIEW",
+  });
+
+  return { boutiqueId: boutique.id };
+}
+
+/** Marks a job's ImportJob row failed, mirroring runAnalyze's catch. */
+export async function markAnalysisJobFailed(jobId: string, message: string): Promise<void> {
+  await prisma.importJob.update({
+    where: { id: jobId },
+    data: { status: "FAILED", error: message },
+  });
 }

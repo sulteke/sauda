@@ -7,6 +7,8 @@ import {
   rateLimitCooldownMs,
 } from "@/config/limits";
 import {
+  type AiBatchItem,
+  type AiBatchResult,
   type AiCategoryProvider,
   AiCategoryProviderError,
   type AiCategoryRequest,
@@ -350,18 +352,22 @@ function shouldFailOver(error: unknown): boolean {
  * analysis has landed, so `analyzedAt`/`analyzedBy` never outlive a job that
  * failed later on.
  */
-export async function analyzeWithPool(
-  request: AiCategoryRequest,
-  options: { throwOnFailure?: boolean; context?: Record<string, unknown> } = {},
-): Promise<PoolAnalysis> {
+/**
+ * The failover machinery, independent of WHAT is being asked of the model.
+ *
+ * `run` is handed one project and the time it may take, and either returns or
+ * throws; everything around it — skipping spent or cooling-down projects,
+ * splitting the time budget, classifying the failure, parking the project — is
+ * identical whether the call carries one shop or several. Keeping it in one
+ * place is what stops batch analysis from quietly growing its own, subtly
+ * different, rules about quota and cooldown.
+ */
+async function withProviderFailover<T>(
+  run: (entry: PooledProvider, budgetMs: number) => Promise<T>,
+  options: { context?: Record<string, unknown> } = {},
+): Promise<{ value: T; providerId: string; providerName: string }> {
   const providers = configuredProviders({ throwOnFailure: true });
   const context = options.context ?? {};
-
-  if (providers.length === 0) {
-    // No key at all — behave exactly as before: contribute nothing, never fail.
-    const result = await disabledAiCategoryProvider.analyze(request);
-    return { result, providerId: "disabled", providerName: disabledAiCategoryProvider.name };
-  }
 
   const usage = await providerUsage(providers);
   const byId = new Map(usage.map((u) => [u.id, u]));
@@ -393,7 +399,7 @@ export async function analyzeWithPool(
 
     attempted += 1;
     try {
-      const result = await entry.provider.analyze(request, { budgetMs });
+      const value = await run(entry, budgetMs);
       logger.info("ai.pool.success", {
         ...context,
         provider: entry.id,
@@ -401,7 +407,7 @@ export async function analyzeWithPool(
         model: process.env.GEMINI_MODEL ?? DEFAULT_GEMINI_MODEL,
         attemptOrder: attempted,
       });
-      return { result, providerId: entry.id, providerName: entry.provider.name };
+      return { value, providerId: entry.id, providerName: entry.provider.name };
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
@@ -447,9 +453,90 @@ export async function analyzeWithPool(
 
   // Nothing ran, or everything that ran failed transiently.
   if (attempted === 0) throw new NoProviderAvailableError(usage);
+
   throw lastError instanceof Error
     ? lastError
     : new AiCategoryProviderError("All AI providers failed", { provider: "pool" });
+}
+
+export async function analyzeWithPool(
+  request: AiCategoryRequest,
+  options: { throwOnFailure?: boolean; context?: Record<string, unknown> } = {},
+): Promise<PoolAnalysis> {
+  if (configuredProviders().length === 0) {
+    // No key at all — behave exactly as before: contribute nothing, never fail.
+    const result = await disabledAiCategoryProvider.analyze(request);
+    return { result, providerId: "disabled", providerName: disabledAiCategoryProvider.name };
+  }
+
+  const { value, providerId, providerName } = await withProviderFailover(
+    (entry, budgetMs) => entry.provider.analyze(request, { budgetMs }),
+    { context: options.context },
+  );
+  return { result: value, providerId, providerName };
+}
+
+export interface PoolBatchAnalysis {
+  batch: AiBatchResult;
+  providerId: string;
+  providerName: string;
+}
+
+/**
+ * Analyzes a whole batch through the pool — ONE request per project attempt.
+ *
+ * The batch is never split across projects: a fallback receives the SAME shops
+ * the primary was asked about. Splitting would turn one failure into two
+ * partial answers that have to be stitched together, and would spend two
+ * projects' quota to do what one request does.
+ *
+ * Throws when no project can run, or when every project that ran failed — the
+ * queue turns that into retryable items, none of them marked analyzed.
+ */
+export async function analyzeBatchWithPool(
+  items: readonly AiBatchItem[],
+  options: { context?: Record<string, unknown> } = {},
+): Promise<PoolBatchAnalysis> {
+  if (items.length === 0) throw new Error("analyzeBatchWithPool called with no items");
+  if (configuredProviders().length === 0) {
+    throw new AiCategoryProviderError("No AI provider is configured for batch analysis.", {
+      provider: "pool",
+    });
+  }
+
+  const handles = items.map((i) => i.handle);
+  const { value, providerId, providerName } = await withProviderFailover(
+    (entry, budgetMs) => {
+      const provider = entry.provider;
+      if (!(provider instanceof GeminiCategoryProvider)) {
+        // Only the Gemini provider speaks batch today. Saying so plainly beats
+        // a cast that would fail somewhere less obvious.
+        throw new AiCategoryProviderError(
+          `Provider ${entry.id} does not support batch analysis.`,
+          { provider: entry.id },
+        );
+      }
+      logger.info("ai.batch.attempt", {
+        ...(options.context ?? {}),
+        provider: entry.id,
+        projectId: entry.projectId,
+        model: entry.model,
+        size: items.length,
+        handles,
+        budgetMs,
+      });
+      return provider.analyzeBatch(items, { budgetMs });
+    },
+    { context: { ...(options.context ?? {}), size: items.length, handles } },
+  );
+  logger.info("ai.batch.success", {
+    ...(options.context ?? {}),
+    provider: providerId,
+    size: items.length,
+    results: value.results.size,
+    skipped: value.skipped.length,
+  });
+  return { batch: value, providerId, providerName };
 }
 
 /**

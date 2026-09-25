@@ -75,6 +75,21 @@ export function geminiFallbackDailyLimit(): number {
   return positiveInt(process.env.GEMINI_FALLBACK_DAILY_LIMIT, DEFAULT_PROVIDER_DAILY_LIMIT);
 }
 
+export const DEFAULT_ANALYSIS_BATCH_SIZE = 3;
+
+/**
+ * How many profiles one model request covers.
+ *
+ * The provider's allowance is spent per REQUEST, so three shops answered
+ * together cost a third of three separate calls. Kept small on purpose: the
+ * more shops share a prompt, the more the model's attention is divided and the
+ * more a single failure costs, and three is enough to turn a 20-request day
+ * into a 60-profile one. Override: ANALYSIS_BATCH_SIZE.
+ */
+export function analysisBatchSize(): number {
+  return positiveInt(process.env.ANALYSIS_BATCH_SIZE, DEFAULT_ANALYSIS_BATCH_SIZE);
+}
+
 /** Time zone whose midnight rolls the provider's request allowance over. */
 export function quotaResetTimeZone(): string {
   return process.env.GEMINI_QUOTA_RESET_TZ || DEFAULT_QUOTA_RESET_TIME_ZONE;

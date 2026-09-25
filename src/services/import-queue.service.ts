@@ -2,13 +2,20 @@ import "server-only";
 
 import type { ImportQueue } from "@prisma/client";
 
-import { minFollowersForAnalysis } from "@/config/limits";
+import { analysisBatchSize, minFollowersForAnalysis } from "@/config/limits";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { countAnalysesToday } from "@/server/ai/analysis-budget";
-import { anyProviderAvailable } from "@/server/ai/ai-provider-pool";
+import { AiCategoryProviderError } from "@/lib/ai-category-provider";
+import { analyzeBatchWithPool, anyProviderAvailable } from "@/server/ai/ai-provider-pool";
+import {
+  applyAnalysisResult,
+  markAnalysisJobFailed,
+  type PreparedAnalysisJob,
+  prepareAnalysisJob,
+} from "@/server/import/import-pipeline";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
-import { analyzeImportJob, parseInstagramProfile } from "@/services/import.service";
+import { parseInstagramProfile } from "@/services/import.service";
 import type { ImportQueueItemDTO } from "@/types";
 
 function toDTO(row: ImportQueue): ImportQueueItemDTO {
@@ -145,7 +152,14 @@ export async function clearQueue(scope: ClearQueueScope): Promise<{ deleted: num
 
 export interface ProcessResult {
   processed: boolean;
+  /** The first item this call settled — kept so single-item callers still work. */
   item: ImportQueueItemDTO | null;
+  /**
+   * Every item this call settled. The Analyze stage now advances a whole batch
+   * in one model request, so one call can finish several items; `item` alone
+   * would under-report the run.
+   */
+  items?: ImportQueueItemDTO[];
   remaining: number;
   /**
    * True when the business day's AI allowance is genuinely used up. The item was
@@ -262,12 +276,15 @@ export async function retryQueueItem(id: string): Promise<ImportQueueItemDTO> {
 export async function processNextImport(): Promise<ProcessResult> {
   await requeueStaleJobs();
 
-  // Stage 2 first — drain analysis.
-  const analyzeRow = await prisma.importQueue.findFirst({
+  // Stage 2 first — drain analysis, a batch at a time so one model request
+  // covers several shops.
+  const analyzeRows = await prisma.importQueue.findMany({
     where: { status: "PENDING_ANALYSIS" },
     orderBy: { createdAt: "asc" },
+    take: analysisBatchSize(),
+    select: { id: true, instagramUrl: true, importJobId: true },
   });
-  if (analyzeRow) return runAnalyzeStage(analyzeRow.id, analyzeRow.instagramUrl, analyzeRow.importJobId);
+  if (analyzeRows.length > 0) return runAnalyzeBatchStage(analyzeRows);
 
   // Stage 1 — start the next parse, unless today's AI allowance is already gone.
   // Scraping more profiles now would only pile up work that cannot be analyzed
@@ -350,7 +367,7 @@ async function runParseStage(id: string, instagramUrl: string): Promise<ProcessR
       durationMs: Date.now() - startedAt,
       remaining,
     });
-    return { processed: true, item: toDTO(updated), remaining };
+    return { processed: true, item: toDTO(updated), items: [toDTO(updated)], remaining };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Parse failed";
     const updated = await prisma.importQueue.update({
@@ -436,114 +453,232 @@ function parsedFollowerCount(rawProfile: unknown): number | null | undefined {
  * The order matters: gating on quality first is what lets a queue full of small
  * accounts keep draining for free instead of stalling behind the allowance.
  */
-async function runAnalyzeStage(
-  id: string,
-  instagramUrl: string,
-  importJobId: string | null,
+/**
+ * Advances the Analyze stage for a WHOLE BATCH of queue items in one model call.
+ *
+ * The gates run per item and cost nothing: an unparsed row and a row below the
+ * follower threshold are resolved here, before any model is involved, exactly
+ * as they were when items were analyzed one at a time. What is left goes to the
+ * model together — ONE request for up to `analysisBatchSize()` shops, which is
+ * the entire point, since the daily allowance is spent per request.
+ *
+ * The batch is all-or-nothing on FAILURE but not on OUTCOME: a shop the model
+ * declines to classify is skipped individually and the rest still land.
+ */
+async function runAnalyzeBatchStage(
+  rows: { id: string; instagramUrl: string; importJobId: string | null }[],
 ): Promise<ProcessResult> {
-  logger.info("queue.analyze_selected", { id, instagramUrl });
   const startedAt = Date.now();
+  const done: ImportQueueItemDTO[] = [];
+  const candidates: { id: string; instagramUrl: string; importJobId: string }[] = [];
 
-  if (!importJobId) {
-    // No linked parse job (e.g. a legacy row) — can't analyze without re-parsing.
-    const message = "No parsed import job linked; re-parse required.";
-    const updated = await prisma.importQueue.update({
-      where: { id },
-      data: { status: "ANALYSIS_FAILED", error: message },
-    });
-    const remaining = await countRemaining();
-    logger.warn("queue.analyze_finished", { id, status: "ANALYSIS_FAILED", remaining, error: message });
-    return { processed: true, item: toDTO(updated), remaining };
-  }
-
-  // Gate 1 — quality. Never reached for an unparsed job (followers === undefined):
-  // that is a parse problem and stays a retryable ANALYSIS_FAILED below.
-  const job = await prisma.importJob.findUnique({
-    where: { id: importJobId },
-    select: { rawProfile: true },
+  logger.info("queue.analyze_selected", {
+    size: rows.length,
+    ids: rows.map((r) => r.id),
   });
-  const followers = parsedFollowerCount(job?.rawProfile);
-  const minFollowers = minFollowersForAnalysis();
-  if (followers !== undefined && (followers === null || followers < minFollowers)) {
-    const message =
-      followers === null
-        ? "Skipped: follower count unavailable."
-        : `Skipped: ${followers.toLocaleString("en-US")} followers — below the ${minFollowers.toLocaleString("en-US")} minimum.`;
-    const updated = await prisma.importQueue.update({
-      where: { id },
-      data: { status: "SKIPPED_LOW_FOLLOWERS", error: message },
-    });
-    const remaining = await countRemaining();
-    logger.info("queue.analyze_skipped", {
-      id,
-      instagramUrl,
-      status: "SKIPPED_LOW_FOLLOWERS",
-      followersCount: followers,
-      minFollowers,
-      remaining,
-    });
-    return { processed: true, item: toDTO(updated), remaining };
+
+  // --- Gate 1: no linked parse job. A legacy row that cannot be analyzed. ---
+  for (const row of rows) {
+    if (!row.importJobId) {
+      const message = "No parsed import job linked; re-parse required.";
+      const updated = await prisma.importQueue.update({
+        where: { id: row.id },
+        data: { status: "ANALYSIS_FAILED", error: message },
+      });
+      logger.warn("queue.analyze_finished", { id: row.id, status: "ANALYSIS_FAILED", error: message });
+      done.push(toDTO(updated));
+      continue;
+    }
+    candidates.push({ ...row, importJobId: row.importJobId });
   }
 
-  // Gate 2 — daily allowance, read from the shared AI budget. The pipeline
-  // enforces the same budget again at the call site; asking here first is what
-  // turns a refusal into a clean stop instead of a spurious ANALYSIS_FAILED.
+  // --- Gate 2: follower quality. Costs no AI, so it is settled even when the
+  // day's allowance is gone. ---
+  const remainingCandidates: typeof candidates = [];
+  for (const row of candidates) {
+    const job = await prisma.importJob.findUnique({
+      where: { id: row.importJobId },
+      select: { rawProfile: true },
+    });
+    const followers = parsedFollowerCount(job?.rawProfile);
+    const minFollowers = minFollowersForAnalysis();
+    if (followers !== undefined && (followers === null || followers < minFollowers)) {
+      const message =
+        followers === null
+          ? "Skipped: follower count unavailable."
+          : `Skipped: ${followers.toLocaleString("en-US")} followers — below the ${minFollowers.toLocaleString("en-US")} minimum.`;
+      const updated = await prisma.importQueue.update({
+        where: { id: row.id },
+        data: { status: "SKIPPED_LOW_FOLLOWERS", error: message },
+      });
+      logger.info("queue.analyze_skipped", {
+        id: row.id,
+        instagramUrl: row.instagramUrl,
+        status: "SKIPPED_LOW_FOLLOWERS",
+        followersCount: followers,
+        minFollowers,
+      });
+      done.push(toDTO(updated));
+      continue;
+    }
+    remainingCandidates.push(row);
+  }
+
+  if (remainingCandidates.length === 0) {
+    const remaining = await countRemaining();
+    return { processed: done.length > 0, item: done[0] ?? null, items: done, remaining };
+  }
+
+  // --- Gate 3: the day's allowance, read once for the whole batch. ---
   const budget = await analysisBudgetSnapshot();
   if (budget.reached) {
     const remaining = await countRemaining();
     const temporary = budget.retryAfter !== null;
     logger.info(temporary ? "queue.cooling_down" : "queue.daily_limit_reached", {
-      id,
-      instagramUrl,
+      ids: remainingCandidates.map((r) => r.id),
       analyzedToday: budget.used,
       limit: budget.limit,
       remaining,
       retryAfter: budget.retryAfter?.toISOString() ?? null,
     });
     // Left untouched in PENDING_ANALYSIS — resumed when the cooldown lifts, or
-    // on the next business day when the budget is genuinely spent.
+    // on the next business day when the budget is genuinely spent. Items the
+    // gates already settled are still reported.
     return {
-      processed: false,
-      item: null,
+      processed: done.length > 0,
+      item: done[0] ?? null,
+      items: done,
       remaining,
       ...(temporary ? { retryAfter: budget.retryAfter!.toISOString() } : { dailyLimitReached: true }),
       analyzedToday: budget.used,
     };
   }
-  const analyzedToday = budget.used;
 
-  await prisma.importQueue.update({ where: { id }, data: { status: "ANALYZING" } });
+  // --- Prepare. A handle keys the model's answer, so it must be unique within
+  // the batch; a repeat waits for the next one rather than making the reply
+  // ambiguous. ---
+  const prepared: PreparedAnalysisJob[] = [];
+  const byJobId = new Map<string, { id: string; instagramUrl: string }>();
+  const seenHandles = new Set<string>();
+  for (const row of remainingCandidates) {
+    try {
+      const job = await prepareAnalysisJob(row.importJobId);
+      const key = job.handle.toLocaleLowerCase("en-US");
+      if (seenHandles.has(key)) {
+        logger.info("queue.analyze_deferred", { id: row.id, handle: job.handle, reason: "duplicate handle in batch" });
+        continue;
+      }
+      seenHandles.add(key);
+      prepared.push(job);
+      byJobId.set(job.jobId, { id: row.id, instagramUrl: row.instagramUrl });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Analysis preparation failed";
+      const updated = await prisma.importQueue.update({
+        where: { id: row.id },
+        data: { status: "ANALYSIS_FAILED", error: message },
+      });
+      logger.warn("queue.analyze_finished", { id: row.id, status: "ANALYSIS_FAILED", error: message });
+      done.push(toDTO(updated));
+    }
+  }
 
-  try {
-    await analyzeImportJob(importJobId);
-    const updated = await prisma.importQueue.update({
-      where: { id },
-      data: { status: "READY_FOR_REVIEW", error: null },
-    });
+  if (prepared.length === 0) {
     const remaining = await countRemaining();
-    logger.info("queue.analyze_finished", {
-      id,
-      status: "READY_FOR_REVIEW",
+    return { processed: done.length > 0, item: done[0] ?? null, items: done, remaining };
+  }
+
+  const queueIds = prepared.map((j) => byJobId.get(j.jobId)!.id);
+  await prisma.importQueue.updateMany({
+    where: { id: { in: queueIds } },
+    data: { status: "ANALYZING" },
+  });
+
+  // --- One model call for the whole batch. ---
+  try {
+    const { batch, providerId } = await analyzeBatchWithPool(
+      prepared.map((j) => ({ handle: j.handle, request: j.prepared.request })),
+      { context: { path: "queue-analyze-batch", size: prepared.length } },
+    );
+
+    const skippedByHandle = new Map(batch.skipped.map((s) => [s.handle, s.reason]));
+
+    for (const job of prepared) {
+      const row = byJobId.get(job.jobId)!;
+      const result = batch.results.get(job.handle);
+
+      if (result) {
+        await applyAnalysisResult(job, result, providerId);
+        const updated = await prisma.importQueue.update({
+          where: { id: row.id },
+          data: { status: "READY_FOR_REVIEW", error: null },
+        });
+        done.push(toDTO(updated));
+        continue;
+      }
+
+      // Declined by the model. Not a system failure and not an analysis: the
+      // row keeps its parsed data, carries the reason, and stays retryable by
+      // hand — it is NOT sent back to the model on its own.
+      const reason = skippedByHandle.get(job.handle) ?? "no reason given";
+      const message = `Skipped by AI: ${reason}`;
+      await markAnalysisJobFailed(job.jobId, message);
+      const updated = await prisma.importQueue.update({
+        where: { id: row.id },
+        data: { status: "ANALYSIS_FAILED", error: message },
+      });
+      logger.info("queue.analyze_ai_skipped", { id: row.id, handle: job.handle, reason });
+      done.push(toDTO(updated));
+    }
+
+    const remaining = await countRemaining();
+    logger.info("queue.analyze_batch_finished", {
+      status: "success",
+      provider: providerId,
+      size: prepared.length,
+      handles: prepared.map((j) => j.handle),
+      results: batch.results.size,
+      skipped: batch.skipped.length,
       durationMs: Date.now() - startedAt,
       remaining,
     });
-    return { processed: true, item: toDTO(updated), remaining, analyzedToday: analyzedToday + 1 };
+    return {
+      processed: true,
+      item: done[0] ?? null,
+      items: done,
+      remaining,
+      analyzedToday: await countAnalysesToday(),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Analysis failed";
-    const updated = await prisma.importQueue.update({
-      where: { id },
-      data: { status: "ANALYSIS_FAILED", error: message },
-    });
+    // The whole batch failed, so no shop in it was analyzed: every row goes
+    // back as retryable, and none of them carries an analyzedAt.
+    for (const job of prepared) {
+      const row = byJobId.get(job.jobId)!;
+      await markAnalysisJobFailed(job.jobId, message).catch(() => undefined);
+      const updated = await prisma.importQueue.update({
+        where: { id: row.id },
+        data: { status: "ANALYSIS_FAILED", error: message },
+      });
+      done.push(toDTO(updated));
+    }
     const remaining = await countRemaining();
-    logger.warn("queue.analyze_finished", {
-      id,
-      status: "ANALYSIS_FAILED",
+    logger.warn("queue.analyze_batch_finished", {
+      status: "failed",
+      size: prepared.length,
+      handles: prepared.map((j) => j.handle),
+      error: message,
+      errorStatus: error instanceof AiCategoryProviderError ? (error.status ?? null) : null,
       durationMs: Date.now() - startedAt,
       remaining,
-      error: message,
     });
     // A failed AI call still consumed quota, so it still counts toward today.
-    return { processed: true, item: toDTO(updated), remaining, analyzedToday: await countAnalysesToday() };
+    return {
+      processed: true,
+      item: done[0] ?? null,
+      items: done,
+      remaining,
+      analyzedToday: await countAnalysesToday(),
+    };
   }
 }
 

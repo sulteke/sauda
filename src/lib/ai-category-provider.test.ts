@@ -10,6 +10,9 @@ import {
   EMPTY_AI_RESULT,
   getAiCategoryProvider,
   parseAiCategoryResult,
+  AiBatchValidationError,
+  buildAiBatchPrompt,
+  parseAiBatchResult,
 } from "./ai-category-provider";
 
 const allowed: ProductCategory[] = [
@@ -181,5 +184,137 @@ describe("parseAiCategoryResult", () => {
     expect(parseAiCategoryResult("not json")).toEqual(EMPTY_AI_RESULT);
     expect(parseAiCategoryResult(42).categories).toEqual([]);
     expect(parseAiCategoryResult(null).categories).toEqual([]);
+  });
+});
+
+/**
+ * A batch reply is only usable if every shop can be matched to its answer with
+ * certainty. These are the ways that can fail; each one must reject the whole
+ * reply rather than persist a plausible mix-up.
+ */
+describe("parseAiBatchResult — validation", () => {
+  const ok = (handles: string[]) =>
+    JSON.stringify({
+      results: Object.fromEntries(handles.map((h) => [h, { categories: [], hashtags: [] }])),
+      skipped: [],
+    });
+
+  it("accepts a reply that answers for every handle", () => {
+    const batch = parseAiBatchResult(ok(["a", "b"]), ["a", "b"]);
+    expect([...batch.results.keys()].sort()).toEqual(["a", "b"]);
+    expect(batch.skipped).toEqual([]);
+  });
+
+  it("accepts a mix of results and skips, and keeps the reason", () => {
+    const batch = parseAiBatchResult(
+      JSON.stringify({
+        results: { a: { categories: [], hashtags: [] } },
+        skipped: [{ handle: "b", reason: "not a clothing shop" }],
+      }),
+      ["a", "b"],
+    );
+    expect(batch.results.has("a")).toBe(true);
+    expect(batch.skipped).toEqual([{ handle: "b", reason: "not a clothing shop" }]);
+  });
+
+  it("matches handles ignoring case and a leading @", () => {
+    const batch = parseAiBatchResult(
+      JSON.stringify({ results: { "@Qoima": { categories: [], hashtags: [] } }, skipped: [] }),
+      ["qoima"],
+    );
+    // Stored under the handle WE submitted, whatever the model echoed.
+    expect(batch.results.has("qoima")).toBe(true);
+  });
+
+  it("rejects a missing handle — silence is not an answer", () => {
+    expect(() => parseAiBatchResult(ok(["a"]), ["a", "b"])).toThrow(AiBatchValidationError);
+  });
+
+  it("rejects a handle that appears in BOTH results and skipped", () => {
+    const raw = JSON.stringify({
+      results: { a: { categories: [], hashtags: [] } },
+      skipped: [{ handle: "a", reason: "unclear" }],
+    });
+    expect(() => parseAiBatchResult(raw, ["a"])).toThrow(/BOTH/);
+  });
+
+  it("rejects a duplicate skipped handle", () => {
+    const raw = JSON.stringify({
+      results: {},
+      skipped: [
+        { handle: "a", reason: "x" },
+        { handle: "a", reason: "y" },
+      ],
+    });
+    expect(() => parseAiBatchResult(raw, ["a"])).toThrow(/more than once/);
+  });
+
+  it("rejects a handle we never sent", () => {
+    expect(() => parseAiBatchResult(ok(["a", "zzz"]), ["a"])).toThrow(/unknown handle/);
+  });
+
+  it("rejects malformed JSON", () => {
+    expect(() => parseAiBatchResult("{not json", ["a"])).toThrow(/not valid JSON/);
+  });
+
+  it("rejects a result entry that is not an object", () => {
+    const raw = JSON.stringify({ results: { a: "hoodies" }, skipped: [] });
+    expect(() => parseAiBatchResult(raw, ["a"])).toThrow(/not an object/);
+  });
+
+  it("rejects a missing results object", () => {
+    expect(() => parseAiBatchResult(JSON.stringify({ skipped: [] }), ["a"])).toThrow(/"results"/);
+  });
+
+  it("still whitelist-checks hashtags inside a batch entry", () => {
+    const raw = JSON.stringify({
+      results: { a: { categories: [], hashtags: ["#Джинсы", "#ВыдуманныйТег"] } },
+      skipped: [],
+    });
+    const batch = parseAiBatchResult(raw, ["a"]);
+    expect(batch.results.get("a")!.hashtags).toEqual(["#Джинсы"]);
+  });
+});
+
+describe("buildAiBatchPrompt", () => {
+  const item = (handle: string) => ({
+    handle,
+    request: {
+      businessName: handle,
+      username: handle,
+      biography: "Женская одежда",
+      externalUrl: null,
+      externalUrls: [],
+      businessAddress: null,
+      captions: [],
+      hashtags: [],
+      mentions: [],
+      allowedCategories: [{ id: "dzhinsy", label: "Джинсы" }],
+      allowedHashtags: ["#Женскаяодежда", "#Джинсы"],
+      keywordResults: [],
+    } as never,
+  });
+
+  it("names every handle and demands each appears exactly once", () => {
+    const prompt = buildAiBatchPrompt([item("a"), item("b"), item("c")]);
+    expect(prompt).toContain("- a");
+    expect(prompt).toContain("- b");
+    expect(prompt).toContain("- c");
+    expect(prompt).toContain("EXACTLY ONCE");
+    expect(prompt).toContain('"results"');
+    expect(prompt).toContain('"skipped"');
+  });
+
+  it("carries the SAME taxonomy rules the single prompt uses", () => {
+    const prompt = buildAiBatchPrompt([item("a")]);
+    // The audience+garment rule that defines our hashtag style must be present,
+    // or a batch would be free to invent a different one.
+    expect(prompt).toContain("#Женскаяодежда #Джинсы");
+    expect(prompt).toContain("PRODUCT CATALOG");
+    expect(prompt).toContain("Never invent a category id");
+  });
+
+  it("tells the model the shops are unrelated", () => {
+    expect(buildAiBatchPrompt([item("a"), item("b")])).toContain("Never let one shop's");
   });
 });

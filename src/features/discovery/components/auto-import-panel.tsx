@@ -140,10 +140,14 @@ export function AutoImportPanel() {
     async function drainQueue() {
       while (!stopRef.current) {
         const result = await processNext.mutateAsync();
-        const status = result.item?.status;
-        if (status && SUCCESS_STATUSES.includes(status)) succeeded += 1;
-        else if (status && FAILED_STATUSES.includes(status)) failed += 1;
-        else if (status && SKIPPED_STATUSES.includes(status)) skipped += 1;
+        // One call can settle a whole batch, so count every item it returned —
+        // reading only `item` would under-report a batched analyze run.
+        const settled = result.items ?? (result.item ? [result.item] : []);
+        for (const entry of settled) {
+          if (SUCCESS_STATUSES.includes(entry.status)) succeeded += 1;
+          else if (FAILED_STATUSES.includes(entry.status)) failed += 1;
+          else if (SKIPPED_STATUSES.includes(entry.status)) skipped += 1;
+        }
         render();
         // Real progress means the outage passed — start counting again.
         if (result.processed) consecutivePauses = 0;

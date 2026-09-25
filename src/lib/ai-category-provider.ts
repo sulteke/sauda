@@ -198,36 +198,19 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
   const max = MAX_TELEGRAM_HASHTAGS;
   const hashtagSchema = wantsHashtags ? ',"hashtags":["#Tag","..."]' : "";
   const hashtagRules = wantsHashtags
-    ? [
-        'Also select Telegram "hashtags" for this boutique. This is a SEPARATE field from "categories" — it describes how the boutique is advertised, not its internal classification.',
-        "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
-        `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
-        "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
-        "COMBINE ONE audience tag with ONE OR TWO garment tags — that is normally the whole set: womenswear jeans is #Женскаяодежда #Джинсы, menswear T-shirts is #Мужскаяодежда #Футболки, unisex hoodies is #Унисексодежда #Худи, women\'s sportswear is #Женскаяодежда #Спортивнаяодежда, and a winter men\'s jacket shop is #Мужскаяодежда #Куртки #Зимняяодежда. Two or three tags is the norm; reach for more only when the shop genuinely sells across several ranges.",
-        "NEVER repeat the same idea at two levels of detail. The audience tag already says who it is for, so do not follow it with a garment tag that repeats the audience, and do not pick a narrower tag when a broader one you already chose covers it.",
-        "Use an audience, seasonal or unisex tag ONLY when the profile actually says so. A coat in a photo is not evidence of #Зимняяодежда, and gender simply not being mentioned is not #Унисексодежда — use the plain garment tag alone whenever the profile does not state it.",
-        'Return an empty "hashtags" array when the content supports none of them.',
-      ]
+    ? hashtagRuleLines(max)
     : [];
   const hashtagSection = wantsHashtags
-    ? [
-        "Allowed hashtags (copy exactly; these are the ONLY permitted values):",
-        formatHashtagWhitelist(allowedHashtags),
-        "",
-      ]
+    ? ["Allowed hashtags (copy exactly; these are the ONLY permitted values):", formatHashtagWhitelist(allowedHashtags), ""]
     : [];
 
   return [
-    "You analyze an Instagram clothing/retail business and profile it.",
-    "TASK — treat this Instagram account as a PRODUCT CATALOG, not a business classifier. Categories are MULTI-LABEL. Read the profile name, bio, hashtags and ALL post captions TOGETHER as one catalog (not post by post). Return EVERY product category the business sells: if a category is clearly present in even ONE post, include it. Multiple categories are expected — if one post advertises jeans, another shoes, another jackets and another T-shirts, return all four. Do NOT collapse to just the most common category, and do NOT return only the dominant or most frequent categories. Include a category even if it appears in only one post. Omit a category ONLY when there is no evidence for it in ANY of the posts.",
-    "Choose category ids ONLY from the allowed list below. Never invent a category id.",
-    `Confidence (0-100) is your CERTAINTY that the business sells that category — NOT how frequently it appears. A single clear post is enough to be highly confident. Include a category only when confidence is ${AI_CONFIDENCE_THRESHOLD} or higher; a clearly-present category must be at least ${AI_CONFIDENCE_THRESHOLD} even if it shows up in just one post (use values below ${AI_CONFIDENCE_THRESHOLD} only when you are genuinely unsure whether they sell it). If no category has any evidence at all, return an empty "categories" array.`,
-    "Sort the categories array by confidence, highest first.",
-    "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — never discard a clearly-correct keyword result, and add any other categories the posts reveal.",
+    ROLE_LINE,
+    ...categoryRuleLines(),
     ...hashtagRules,
     "Respond with STRICT JSON only. No markdown, no code fences, no commentary, no extra fields. Match EXACTLY this schema:",
-    `{"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}]${hashtagSchema},"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."}`,
-    "Use null (not empty string) for city, mall, address, targetAudience, priceSegment, style or summary when unknown.",
+    `{${SHOP_OBJECT_SCHEMA(hashtagSchema)}}`,
+    NULL_RULE,
     "",
     "Allowed categories:",
     allowed,
@@ -239,6 +222,47 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
     "Business data (text only):",
     data,
   ].join("\n");
+}
+
+/** Opening line — identical for one shop or many. */
+const ROLE_LINE = "You analyze an Instagram clothing/retail business and profile it.";
+
+const NULL_RULE =
+  "Use null (not empty string) for city, mall, address, targetAudience, priceSegment, style or summary when unknown.";
+
+/** The per-shop JSON shape, shared by the single and batch schemas. */
+const SHOP_OBJECT_SCHEMA = (hashtagSchema: string) =>
+  `"categories":[{"id":"<allowed id>","confidence":0-100,"reason":"..."}]${hashtagSchema},"city":"...","mall":"...","address":"...","targetAudience":"...","priceSegment":"...","style":"...","summary":"..."`;
+
+/**
+ * The category rules, in one place.
+ *
+ * Both prompts read from here rather than each carrying its own copy, because
+ * the batch prompt exists to save requests — not to quietly analyze shops by
+ * different rules than the single prompt does.
+ */
+function categoryRuleLines(): string[] {
+  return [
+    "TASK — treat this Instagram account as a PRODUCT CATALOG, not a business classifier. Categories are MULTI-LABEL. Read the profile name, bio, hashtags and ALL post captions TOGETHER as one catalog (not post by post). Return EVERY product category the business sells: if a category is clearly present in even ONE post, include it. Multiple categories are expected — if one post advertises jeans, another shoes, another jackets and another T-shirts, return all four. Do NOT collapse to just the most common category, and do NOT return only the dominant or most frequent categories. Include a category even if it appears in only one post. Omit a category ONLY when there is no evidence for it in ANY of the posts.",
+    "Choose category ids ONLY from the allowed list below. Never invent a category id.",
+    `Confidence (0-100) is your CERTAINTY that the business sells that category — NOT how frequently it appears. A single clear post is enough to be highly confident. Include a category only when confidence is ${AI_CONFIDENCE_THRESHOLD} or higher; a clearly-present category must be at least ${AI_CONFIDENCE_THRESHOLD} even if it shows up in just one post (use values below ${AI_CONFIDENCE_THRESHOLD} only when you are genuinely unsure whether they sell it). If no category has any evidence at all, return an empty "categories" array.`,
+    "Sort the categories array by confidence, highest first.",
+    "The keyword engine already ran; treat its results as strong prior signals. Validate or EXTEND them — never discard a clearly-correct keyword result, and add any other categories the posts reveal.",
+  ];
+}
+
+/** The hashtag rules, in one place — see {@link categoryRuleLines}. */
+function hashtagRuleLines(max: number): string[] {
+  return [
+        'Also select Telegram "hashtags" for this boutique. This is a SEPARATE field from "categories" — it describes how the boutique is advertised, not its internal classification.',
+        "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
+        `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
+        "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
+        "COMBINE ONE audience tag with ONE OR TWO garment tags — that is normally the whole set: womenswear jeans is #Женскаяодежда #Джинсы, menswear T-shirts is #Мужскаяодежда #Футболки, unisex hoodies is #Унисексодежда #Худи, women\'s sportswear is #Женскаяодежда #Спортивнаяодежда, and a winter men\'s jacket shop is #Мужскаяодежда #Куртки #Зимняяодежда. Two or three tags is the norm; reach for more only when the shop genuinely sells across several ranges.",
+        "NEVER repeat the same idea at two levels of detail. The audience tag already says who it is for, so do not follow it with a garment tag that repeats the audience, and do not pick a narrower tag when a broader one you already chose covers it.",
+        "Use an audience, seasonal or unisex tag ONLY when the profile actually says so. A coat in a photo is not evidence of #Зимняяодежда, and gender simply not being mentioned is not #Унисексодежда — use the plain garment tag alone whenever the profile does not state it.",
+    'Return an empty "hashtags" array when the content supports none of them.',
+  ];
 }
 
 function toStringOrNull(value: unknown): string | null {
@@ -296,4 +320,197 @@ export function parseAiCategoryResult(raw: unknown): AiCategoryResult {
     style: toStringOrNull(obj.style),
     summary: toStringOrNull(obj.summary),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Batch analysis
+//
+// Several shops in ONE model call. The point is the request count: a provider's
+// daily allowance is spent per REQUEST, so three shops answered together cost a
+// third of what three separate calls cost. Nothing else changes — the rules,
+// the allowed ids and the allowed hashtags are the very same ones the single
+// prompt uses, because a batch must not quietly classify shops by other rules.
+
+/** One shop inside a batch, paired with the handle its result must come back under. */
+export interface AiBatchItem {
+  handle: string;
+  request: AiCategoryRequest;
+}
+
+/** A shop the model declined to classify, and why. Not a failure — a decision. */
+export interface AiBatchSkip {
+  handle: string;
+  reason: string;
+}
+
+export interface AiBatchResult {
+  /** Keyed by the handle exactly as it was submitted. */
+  results: Map<string, AiCategoryResult>;
+  skipped: AiBatchSkip[];
+}
+
+/**
+ * Raised when a batch reply cannot be trusted as a whole.
+ *
+ * A batch is all-or-nothing on VALIDITY: if one shop is missing, duplicated or
+ * unknown, the reply says nothing reliable about which answer belongs to which
+ * shop, and writing any of it risks attributing one boutique's categories to
+ * another. Far better to fail the batch and retry than to persist a plausible
+ * mix-up that nobody would ever notice.
+ */
+export class AiBatchValidationError extends Error {
+  constructor(message: string) {
+    super(`AI batch reply is invalid: ${message}`);
+    this.name = "AiBatchValidationError";
+  }
+}
+
+/** The per-shop payload the model reads — same fields the single prompt sends. */
+function batchShopPayload(item: AiBatchItem): Record<string, unknown> {
+  const r = item.request;
+  return {
+    handle: item.handle,
+    keywordEngineResults: (r.keywordResults ?? []).map((k) => ({ id: k.id, score: k.score })),
+    businessName: r.businessName,
+    username: r.username,
+    biography: r.biography,
+    website: r.externalUrl,
+    externalLinks: r.externalUrls,
+    businessAddress: r.businessAddress,
+    captions: r.captions,
+    hashtags: r.hashtags,
+    mentions: r.mentions,
+    enrichment: r.enrichment ?? null,
+  };
+}
+
+/**
+ * Builds ONE prompt covering several shops.
+ *
+ * The allowed categories and hashtags are read from the first item: every item
+ * in a batch is built from the same configuration, so they are identical by
+ * construction, and sending them once per shop would waste most of the prompt.
+ */
+export function buildAiBatchPrompt(items: readonly AiBatchItem[]): string {
+  if (items.length === 0) throw new AiBatchValidationError("a batch needs at least one shop");
+
+  const first = items[0]!.request;
+  const allowed = first.allowedCategories.map((c) => `- ${c.id} (${c.label})`).join("\n");
+  const allowedHashtags = first.allowedHashtags ?? [];
+  const wantsHashtags = allowedHashtags.length > 0;
+  const hashtagSchema = wantsHashtags ? ',"hashtags":["#Tag","..."]' : "";
+  const handles = items.map((i) => i.handle);
+
+  return [
+    ROLE_LINE,
+    `You are given ${items.length} shops in one request. Analyze EACH shop INDEPENDENTLY, using only that shop's own data. Never let one shop's products, city or style influence another's — they are unrelated businesses that happen to be sent together.`,
+    ...categoryRuleLines(),
+    ...(wantsHashtags ? hashtagRuleLines(MAX_TELEGRAM_HASHTAGS) : []),
+    "",
+    "BATCH RULES — these decide whether the whole reply is usable:",
+    `- Every handle listed below must appear EXACTLY ONCE: either as a key in "results" or as an entry in "skipped". Never both, never neither.`,
+    "- Use the handle string exactly as given. Do not add an @, change its case, or invent handles.",
+    `- If a shop's data is too thin, unclear or not a clothing business, put it in "skipped" with a short reason instead of guessing. A skip is a normal outcome, not an error.`,
+    "- One skipped shop must NOT affect the others: analyze every shop you can.",
+    "",
+    "Respond with STRICT JSON only. No markdown, no code fences, no commentary, no extra fields. Match EXACTLY this schema:",
+    `{"results":{"<handle>":{${SHOP_OBJECT_SCHEMA(hashtagSchema)}}},"skipped":[{"handle":"<handle>","reason":"..."}]}`,
+    NULL_RULE,
+    `Return "skipped": [] when you classified every shop.`,
+    "",
+    "Handles in this batch (each must appear exactly once in the reply):",
+    handles.map((h) => `- ${h}`).join("\n"),
+    "",
+    "Allowed categories:",
+    allowed,
+    "",
+    ...(wantsHashtags
+      ? [
+          "Allowed hashtags (copy exactly; these are the ONLY permitted values):",
+          formatHashtagWhitelist(allowedHashtags),
+          "",
+        ]
+      : []),
+    "Shops (text only):",
+    JSON.stringify(items.map(batchShopPayload), null, 2),
+  ].join("\n");
+}
+
+/**
+ * Validates a batch reply against the handles that were actually sent, and
+ * converts it. Throws {@link AiBatchValidationError} on anything that would make
+ * the mapping ambiguous — see the class comment for why that is worth failing.
+ *
+ * Handle matching ignores case and a leading "@": the model occasionally echoes
+ * a handle prettified, and rejecting a whole batch over "@Qoima" vs "qoima"
+ * would spend a request to punish a cosmetic difference.
+ */
+export function parseAiBatchResult(raw: unknown, expected: readonly string[]): AiBatchResult {
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new AiBatchValidationError("reply is not valid JSON");
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AiBatchValidationError("reply is not a JSON object");
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const rawResults = obj.results;
+  const rawSkipped = obj.skipped ?? [];
+  if (!rawResults || typeof rawResults !== "object" || Array.isArray(rawResults)) {
+    throw new AiBatchValidationError('"results" is missing or not an object');
+  }
+  if (!Array.isArray(rawSkipped)) {
+    throw new AiBatchValidationError('"skipped" is not an array');
+  }
+
+  const key = (h: string) => h.trim().replace(/^@/, "").toLocaleLowerCase("en-US");
+  const canonical = new Map(expected.map((h) => [key(h), h]));
+  const seen = new Map<string, "result" | "skipped">();
+
+  const results = new Map<string, AiCategoryResult>();
+  for (const [handle, value] of Object.entries(rawResults as Record<string, unknown>)) {
+    const real = canonical.get(key(handle));
+    if (!real) throw new AiBatchValidationError(`unknown handle in results: ${handle}`);
+    if (seen.has(key(handle))) {
+      throw new AiBatchValidationError(`handle appears more than once: ${real}`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new AiBatchValidationError(`result for ${real} is not an object`);
+    }
+    seen.set(key(handle), "result");
+    results.set(real, parseAiCategoryResult(value));
+  }
+
+  const skipped: AiBatchSkip[] = [];
+  for (const entry of rawSkipped) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new AiBatchValidationError("a skipped entry is not an object");
+    }
+    const e = entry as Record<string, unknown>;
+    const handle = typeof e.handle === "string" ? e.handle : "";
+    const real = canonical.get(key(handle));
+    if (!real) throw new AiBatchValidationError(`unknown handle in skipped: ${handle || "(missing)"}`);
+    const already = seen.get(key(handle));
+    if (already === "result") {
+      throw new AiBatchValidationError(`${real} appears in BOTH results and skipped`);
+    }
+    if (already === "skipped") {
+      throw new AiBatchValidationError(`handle appears more than once in skipped: ${real}`);
+    }
+    seen.set(key(handle), "skipped");
+    const reason = typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : "no reason given";
+    skipped.push({ handle: real, reason });
+  }
+
+  const missing = expected.filter((h) => !seen.has(key(h)));
+  if (missing.length > 0) {
+    throw new AiBatchValidationError(`no answer for: ${missing.join(", ")}`);
+  }
+
+  return { results, skipped };
 }

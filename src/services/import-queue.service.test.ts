@@ -51,8 +51,38 @@ vi.mock("@/services/import.service", () => ({ parseInstagramProfile, analyzeImpo
 
 // Provider availability is the pool's job and is covered in its own test file;
 // here it is a dial, so the queue's reaction to "no capacity" can be exercised.
-const { anyProviderAvailable } = vi.hoisted(() => ({ anyProviderAvailable: vi.fn() }));
-vi.mock("@/server/ai/ai-provider-pool", () => ({ anyProviderAvailable }));
+const { anyProviderAvailable, analyzeBatchWithPool } = vi.hoisted(() => ({
+  anyProviderAvailable: vi.fn(),
+  analyzeBatchWithPool: vi.fn(),
+}));
+vi.mock("@/server/ai/ai-provider-pool", () => ({ anyProviderAvailable, analyzeBatchWithPool }));
+
+// The Analyze stage now sends a BATCH: it prepares each job, makes one pooled
+// call, then applies each result. Those three are seams here; their own
+// behaviour lives in the pipeline and pool tests.
+const { prepareAnalysisJob, applyAnalysisResult, markAnalysisJobFailed } = vi.hoisted(() => ({
+  prepareAnalysisJob: vi.fn(),
+  applyAnalysisResult: vi.fn(),
+  markAnalysisJobFailed: vi.fn(),
+}));
+vi.mock("@/server/import/import-pipeline", () => ({
+  prepareAnalysisJob,
+  applyAnalysisResult,
+  markAnalysisJobFailed,
+}));
+
+/** An empty AI result, enough for the queue to treat a shop as analyzed. */
+const aiResult = () => ({
+  categories: [],
+  hashtags: [],
+  city: null,
+  mall: null,
+  address: null,
+  targetAudience: null,
+  priceSegment: null,
+  style: null,
+  summary: null,
+});
 
 import {
   addUrlsToQueue,
@@ -85,8 +115,30 @@ function resetAll() {
   boutiqueFindMany.mockResolvedValue([]);
   parseInstagramProfile.mockReset();
   analyzeImportJob.mockReset();
-  // Default: no stale jobs, nothing to promote, queue drained.
+  for (const fn of [analyzeBatchWithPool, prepareAnalysisJob, applyAnalysisResult, markAnalysisJobFailed])
+    fn.mockReset();
+  // findMany serves two callers now: stale recovery and picking the analyze
+  // batch. Default both to empty; tests opt in with pendingAnalysis().
   findMany.mockResolvedValue([]);
+  // Default batch seams: one job in, one analyzed result out.
+  prepareAnalysisJob.mockImplementation((jobId: string) =>
+    Promise.resolve({
+      jobId,
+      handle: `h-${jobId}`,
+      rawProfile: {},
+      prepared: { keyword: [], enrichment: {}, request: {} },
+    }),
+  );
+  applyAnalysisResult.mockResolvedValue({ boutiqueId: "b1" });
+  markAnalysisJobFailed.mockResolvedValue(undefined);
+  // By default the model answers for every shop it was given.
+  analyzeBatchWithPool.mockImplementation((items: { handle: string }[]) =>
+    Promise.resolve({
+      batch: { results: new Map(items.map((i) => [i.handle, aiResult()])), skipped: [] },
+      providerId: "primary",
+      providerName: "gemini",
+    }),
+  );
   updateMany.mockResolvedValue({ count: 0 });
   findFirst.mockResolvedValue(null);
   count.mockResolvedValue(0);
@@ -191,14 +243,12 @@ describe("processNextImport", () => {
     const result = await processNextImport();
     expect(result).toEqual({ processed: false, item: null, remaining: 0 });
     expect(parseInstagramProfile).not.toHaveBeenCalled();
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
   });
 
   it("parses the oldest PENDING_PARSE item (Apify only) and hands off to PENDING_ANALYSIS", async () => {
     // First findFirst (PENDING_ANALYSIS) → none; second (PENDING_PARSE) → a row.
-    findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
     parseInstagramProfile.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
     count.mockResolvedValue(0);
 
@@ -208,7 +258,7 @@ describe("processNextImport", () => {
       url: "https://instagram.com/p1",
       userId: null,
     });
-    expect(analyzeImportJob).not.toHaveBeenCalled(); // no Gemini in the parse stage
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled(); // no Gemini in the parse stage
     // Marked PARSING then handed straight off to PENDING_ANALYSIS, linked to the ImportJob.
     expect(update).toHaveBeenCalledWith({ where: { id: "p1" }, data: { status: "PARSING" } });
     expect(update).toHaveBeenCalledWith({
@@ -219,18 +269,18 @@ describe("processNextImport", () => {
   });
 
   it("prioritises analysis: analyzes a PENDING_ANALYSIS item via its linked job (no Apify)", async () => {
-    findFirst.mockResolvedValueOnce({
-      id: "a1",
-      instagramUrl: "https://instagram.com/a1",
-      importJobId: "job-9",
-    });
-    analyzeImportJob.mockResolvedValue({ job: { id: "job-9" }, boutiqueId: "b9" });
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-9" }]);
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).toHaveBeenCalledWith("job-9");
+    expect(prepareAnalysisJob).toHaveBeenCalledWith("job-9");
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    expect(applyAnalysisResult).toHaveBeenCalledTimes(1);
     expect(parseInstagramProfile).not.toHaveBeenCalled(); // never re-scrapes during analysis
-    expect(update).toHaveBeenCalledWith({ where: { id: "a1" }, data: { status: "ANALYZING" } });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ["a1"] } },
+      data: { status: "ANALYZING" },
+    });
     expect(update).toHaveBeenCalledWith({
       where: { id: "a1" },
       data: { status: "READY_FOR_REVIEW", error: null },
@@ -239,9 +289,7 @@ describe("processNextImport", () => {
   });
 
   it("marks PARSE_FAILED when Apify fails, without touching analysis", async () => {
-    findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "p2", instagramUrl: "https://instagram.com/p2", importJobId: null });
+    findFirst.mockResolvedValueOnce({ id: "p2", instagramUrl: "https://instagram.com/p2", importJobId: null });
     parseInstagramProfile.mockRejectedValue(new Error("Apify timed out"));
 
     await processNextImport();
@@ -250,16 +298,12 @@ describe("processNextImport", () => {
       where: { id: "p2" },
       data: { status: "PARSE_FAILED", error: "Apify timed out" },
     });
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
   });
 
   it("marks ANALYSIS_FAILED when Gemini fails, leaving the parsed data intact (no re-scrape)", async () => {
-    findFirst.mockResolvedValueOnce({
-      id: "a2",
-      instagramUrl: "https://instagram.com/a2",
-      importJobId: "job-7",
-    });
-    analyzeImportJob.mockRejectedValue(new Error("Gemini 503"));
+    pendingAnalysis([{ id: "a2", instagramUrl: "https://instagram.com/a2", importJobId: "job-7" }]);
+    analyzeBatchWithPool.mockRejectedValue(new Error("Gemini 503"));
 
     await processNextImport();
 
@@ -273,12 +317,15 @@ describe("processNextImport", () => {
 
 /** Queues one PENDING_ANALYSIS row whose parsed profile has this follower count. */
 function pendingAnalysisWith(followersCount: unknown) {
-  findFirst.mockResolvedValueOnce({
-    id: "q1",
-    instagramUrl: "https://instagram.com/q1",
-    importJobId: "job-1",
-  });
+  pendingAnalysis([{ id: "q1", instagramUrl: "https://instagram.com/q1", importJobId: "job-1" }]);
   jobFindUnique.mockResolvedValue({ rawProfile: { followersCount } });
+}
+
+/** Queue these rows as the PENDING_ANALYSIS batch; stale recovery still sees none. */
+function pendingAnalysis(rows: { id: string; instagramUrl: string; importJobId: string | null }[]) {
+  findMany.mockImplementation(({ where }: { where: { status: string } }) =>
+    Promise.resolve(where.status === "PENDING_ANALYSIS" ? rows : []),
+  );
 }
 
 describe("follower quality gate", () => {
@@ -294,7 +341,7 @@ describe("follower quality gate", () => {
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
       where: { id: "q1" },
       data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("4,999") },
@@ -310,7 +357,7 @@ describe("follower quality gate", () => {
 
     await processNextImport();
 
-    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
   });
 
   it("10,000 followers qualifies: the AI IS called", async () => {
@@ -319,7 +366,7 @@ describe("follower quality gate", () => {
 
     await processNextImport();
 
-    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
   });
 
   it("skips conservatively when the follower count is unavailable (null)", async () => {
@@ -327,7 +374,7 @@ describe("follower quality gate", () => {
 
     await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
       where: { id: "q1" },
       data: { status: "SKIPPED_LOW_FOLLOWERS", error: "Skipped: follower count unavailable." },
@@ -335,13 +382,9 @@ describe("follower quality gate", () => {
   });
 
   it("keeps an unparsed job retryable (ANALYSIS_FAILED) instead of skipping it", async () => {
-    findFirst.mockResolvedValueOnce({
-      id: "q1",
-      instagramUrl: "https://instagram.com/q1",
-      importJobId: "job-1",
-    });
+    pendingAnalysis([{ id: "q1", instagramUrl: "https://instagram.com/q1", importJobId: "job-1" }]);
     jobFindUnique.mockResolvedValue({ rawProfile: null });
-    analyzeImportJob.mockRejectedValue(new Error("Import job has not been parsed yet"));
+    prepareAnalysisJob.mockRejectedValue(new Error("Import job has not been parsed yet"));
 
     await processNextImport();
 
@@ -378,7 +421,7 @@ describe("daily analysis limit", () => {
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).toHaveBeenCalledWith("job-1");
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
     expect(result.dailyLimitReached).toBeUndefined();
   });
 
@@ -388,7 +431,7 @@ describe("daily analysis limit", () => {
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     // Nothing written: the row is still PENDING_ANALYSIS, first in line tomorrow.
     expect(update).not.toHaveBeenCalled();
     expect(result).toMatchObject({ processed: false, item: null, dailyLimitReached: true });
@@ -401,7 +444,7 @@ describe("daily analysis limit", () => {
     const result = await processNextImport();
 
     expect(anyProviderAvailable).toHaveBeenCalled();
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     expect(result.dailyLimitReached).toBe(true);
   });
 
@@ -411,7 +454,7 @@ describe("daily analysis limit", () => {
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith({
       where: { id: "q1" },
       data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("1,200") },
@@ -421,9 +464,7 @@ describe("daily analysis limit", () => {
   });
 
   it("does not start a new Apify parse once the allowance is spent", async () => {
-    findFirst
-      .mockResolvedValueOnce(null) // no pending analysis
-      .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
     exhaustAllProviders();
 
     const result = await processNextImport();
@@ -465,7 +506,7 @@ describe("temporary provider cooldown (503/504) pauses instead of stopping", () 
 
     const result = await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
     // Untouched, exactly as at the daily limit — but the caller may come back.
     expect(update).not.toHaveBeenCalled();
     expect(result).toMatchObject({ processed: false, item: null, retryAfter: soon.toISOString() });
@@ -509,9 +550,7 @@ describe("temporary provider cooldown (503/504) pauses instead of stopping", () 
   });
 
   it("pauses the parse stage too, so no Apify credit is spent while waiting", async () => {
-    findFirst
-      .mockResolvedValueOnce(null) // no pending analysis
-      .mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
     coolDownAllProviders(soon, later);
 
     const result = await processNextImport();
@@ -632,9 +671,7 @@ describe("duplicate protection", () => {
 
   /** Queue a single PENDING_PARSE row for `url`. */
   function pendingParse(url: string) {
-    findFirst
-      .mockResolvedValueOnce(null) // nothing pending analysis
-      .mockResolvedValueOnce({ id: "p1", instagramUrl: url, importJobId: null });
+    findFirst.mockResolvedValue({ id: "p1", instagramUrl: url, importJobId: null });
     count.mockResolvedValue(0);
     update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({
@@ -678,7 +715,7 @@ describe("duplicate protection", () => {
 
     await processNextImport();
 
-    expect(analyzeImportJob).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
   });
 
   it("never even marks it PARSING — the check runs before the scrape begins", async () => {
@@ -800,5 +837,123 @@ describe("addUrlsToQueue duplicate filter", () => {
     expect(result).toEqual({ added: 0, skipped: 2, duplicates: 0 });
     expect(boutiqueFindMany).not.toHaveBeenCalled();
     expect(queueCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The reason batching exists: a provider's daily allowance is spent per
+ * REQUEST, so three shops answered together must cost one request, not three.
+ */
+describe("batch analysis", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const rows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `q${i}`,
+      instagramUrl: `https://instagram.com/s${i}`,
+      importJobId: `job-${i}`,
+    }));
+
+  it("sends THREE shops in ONE model request", async () => {
+    pendingAnalysis(rows(3));
+
+    await processNextImport();
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    const [items] = analyzeBatchWithPool.mock.calls[0] as [{ handle: string }[]];
+    expect(items.map((i) => i.handle)).toEqual(["h-job-0", "h-job-1", "h-job-2"]);
+  });
+
+  it("settles every shop in the batch, not just the first", async () => {
+    pendingAnalysis(rows(3));
+    update.mockImplementation(({ where, data }: { where: { id: string }; data: { status: string } }) =>
+      Promise.resolve({
+        id: where.id,
+        instagramUrl: "u",
+        status: data.status,
+        error: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }),
+    );
+
+    const result = await processNextImport();
+
+    expect(applyAnalysisResult).toHaveBeenCalledTimes(3);
+    expect(result.items).toHaveLength(3);
+    expect(result.items!.every((i) => i.status === "READY_FOR_REVIEW")).toBe(true);
+  });
+
+  it("a shop the model declines does NOT spoil the others", async () => {
+    pendingAnalysis(rows(3));
+    analyzeBatchWithPool.mockImplementation((items: { handle: string }[]) =>
+      Promise.resolve({
+        batch: {
+          results: new Map(items.slice(0, 2).map((i) => [i.handle, aiResult()])),
+          skipped: [{ handle: items[2]!.handle, reason: "no clothing signal" }],
+        },
+        providerId: "primary",
+        providerName: "gemini",
+      }),
+    );
+
+    await processNextImport();
+
+    // Two analyzed, one carries the model's reason and is NOT analyzed.
+    expect(applyAnalysisResult).toHaveBeenCalledTimes(2);
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q2" },
+      data: { status: "ANALYSIS_FAILED", error: "Skipped by AI: no clothing signal" },
+    });
+  });
+
+  it("a failed batch marks every shop retryable and analyzes none", async () => {
+    pendingAnalysis(rows(3));
+    analyzeBatchWithPool.mockRejectedValue(new Error("Gemini 503"));
+
+    await processNextImport();
+
+    expect(applyAnalysisResult).not.toHaveBeenCalled();
+    for (const id of ["q0", "q1", "q2"]) {
+      expect(update).toHaveBeenCalledWith({
+        where: { id },
+        data: { status: "ANALYSIS_FAILED", error: "Gemini 503" },
+      });
+    }
+  });
+
+  it("keeps a repeated handle out of the same batch — the reply must stay unambiguous", async () => {
+    pendingAnalysis(rows(2));
+    prepareAnalysisJob.mockImplementation((jobId: string) =>
+      Promise.resolve({
+        jobId,
+        handle: "same", // both rows resolve to one handle
+        rawProfile: {},
+        prepared: { keyword: [], enrichment: {}, request: {} },
+      }),
+    );
+
+    await processNextImport();
+
+    const [items] = analyzeBatchWithPool.mock.calls[0] as [{ handle: string }[]];
+    expect(items).toHaveLength(1);
+  });
+
+  it("low-follower shops are settled without entering the batch at all", async () => {
+    pendingAnalysis(rows(2));
+    jobFindUnique.mockResolvedValue({ rawProfile: { followersCount: 100 } });
+
+    await processNextImport();
+
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "q0" },
+      data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("100") },
+    });
   });
 });

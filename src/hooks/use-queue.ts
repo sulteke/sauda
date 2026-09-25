@@ -44,7 +44,10 @@ export function useAddToQueue() {
 
 export interface ProcessResult {
   processed: boolean;
+  /** First item settled — kept for callers written before batching. */
   item: ImportQueueItemDTO | null;
+  /** Every item settled by this call; the Analyze stage settles a batch. */
+  items?: ImportQueueItemDTO[];
   remaining: number;
   /** Today's AI allowance is spent — stop the loop and resume tomorrow. */
   dailyLimitReached?: boolean;

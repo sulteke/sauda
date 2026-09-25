@@ -307,18 +307,52 @@ export async function runHybridDetection(
   input: CategoryDetectionInput,
   options: HybridDetectionOptions = {},
 ): Promise<HybridDetectionResult> {
-  const config = options.config ?? DEFAULT_ENGINE_CONFIG;
   const provider = options.aiProvider ?? disabledAiCategoryProvider;
+  const prepared = prepareDetection(input, options);
+  const ai = await provider.analyze(prepared.request);
+  return completeDetection(prepared, ai, options.config ?? DEFAULT_ENGINE_CONFIG);
+}
 
+/** Everything the keyword stage produced, plus the request the model will read. */
+export interface PreparedDetection {
+  keyword: DetectedCategory[];
+  enrichment: BoutiqueEnrichment;
+  request: AiCategoryRequest;
+}
+
+/**
+ * Runs the keyword stage and builds the model request, WITHOUT calling the model.
+ *
+ * Split out so several shops can be prepared, sent in one batch, and completed
+ * individually. The single-shop path calls it too, so batching cannot drift
+ * into building a different request than the one we have always sent.
+ */
+export function prepareDetection(
+  input: CategoryDetectionInput,
+  options: HybridDetectionOptions = {},
+): PreparedDetection {
+  const config = options.config ?? DEFAULT_ENGINE_CONFIG;
   const keyword = detectCategories(toKeywordInput(input), config);
   const enrichment = options.enrichment ?? enrichmentFromInput(input);
-  const request = toAiRequest(input, config, { keywordResults: keyword, enrichment });
+  return {
+    keyword,
+    enrichment,
+    request: toAiRequest(input, config, { keywordResults: keyword, enrichment }),
+  };
+}
 
-  const ai = await provider.analyze(request);
+/** Merges a model result into a prepared detection — the half after the call. */
+export function completeDetection(
+  prepared: PreparedDetection,
+  ai: AiCategoryResult,
+  config: EngineConfig = DEFAULT_ENGINE_CONFIG,
+): HybridDetectionResult {
   const aiDetected = aiSuggestionsToDetected(ai, config);
-  const autoDetected = mergeDetected([keyword, aiDetected]);
-
-  return { keyword, ai, autoDetected };
+  return {
+    keyword: prepared.keyword,
+    ai,
+    autoDetected: mergeDetected([prepared.keyword, aiDetected]),
+  };
 }
 
 // ---------------------------------------------------------------------------

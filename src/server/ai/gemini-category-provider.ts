@@ -1,15 +1,19 @@
 import "server-only";
 
 import {
+  type AiBatchItem,
+  type AiBatchResult,
   type AiCategoryAnalyzeOptions,
   type AiCategoryProvider,
   AiCategoryProviderError,
   type AiCategoryRequest,
   type AiCategoryResult,
   type QuotaScope,
+  buildAiBatchPrompt,
   buildAiCategoryPrompt,
   disabledAiCategoryProvider,
   EMPTY_AI_RESULT,
+  parseAiBatchResult,
   parseAiCategoryResult,
 } from "@/lib/ai-category-provider";
 import { logger } from "@/lib/logger";
@@ -176,13 +180,20 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
     return { ...EMPTY_AI_RESULT };
   }
 
-  async analyze(
-    request: AiCategoryRequest,
-    options: AiCategoryAnalyzeOptions = {},
-  ): Promise<AiCategoryResult> {
-    const prompt = buildAiCategoryPrompt(request);
+  /**
+   * Sends ONE prompt and returns the model's raw text, retrying transient
+   * faults. Always THROWS `AiCategoryProviderError` on a terminal failure — the
+   * graceful-degradation policy belongs to the caller, because "empty result"
+   * is a sane answer for one shop and a dangerous one for a batch.
+   */
+  private async request(
+    prompt: string,
+    options: AiCategoryAnalyzeOptions,
+    label: string,
+  ): Promise<string> {
     // Hard deadline for the whole call — every attempt and every backoff wait.
     const deadline = Date.now() + (options.budgetMs ?? this.analyzeBudgetMs);
+    let last: AiCategoryProviderError | null = null;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       // Stop if there isn't enough time left for a useful attempt.
@@ -195,12 +206,13 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
         logger.warn("gemini.request_budget_spent", {
           provider: this.name,
           model: this.model,
+          label,
           attempt,
         });
-        return this.fail({
-          message: `Gemini request budget spent for ${this.model} today`,
-          quotaScope: "per-day",
-        });
+        throw new AiCategoryProviderError(
+          `Gemini request budget spent for ${this.model} today`,
+          { provider: this.name, quotaScope: "per-day" },
+        );
       }
 
       const controller = new AbortController();
@@ -223,27 +235,34 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
 
         if (response.ok) {
           const payload = (await response.json()) as GeminiResponse;
-          const text = (payload.candidates?.[0]?.content?.parts ?? [])
-            .map((p) => p.text ?? "")
-            .join("");
-          const result = parseAiCategoryResult(text);
           const usage = payload.usageMetadata ?? {};
           logger.info("gemini.request_ok", {
             provider: this.name,
             model: this.model,
+            label,
             attempt,
             promptTokens: usage.promptTokenCount ?? null,
             responseTokens: usage.candidatesTokenCount ?? null,
             totalTokens: usage.totalTokenCount ?? null,
             durationMs,
-            categories: result.categories.length,
           });
-          return result;
+          return (payload.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("");
         }
 
         // Non-2xx. Read the body once so the exact Google error is diagnosable.
         // Logged at WARN (console.warn) — visible in Vercel logs (unlike console.log).
         const body = await response.text().catch(() => "");
+        last = new AiCategoryProviderError(
+          `Gemini request failed (${response.status} ${response.statusText})`,
+          {
+            provider: this.name,
+            status: response.status,
+            // A 429 names the limit it hit; the pool reacts very differently to
+            // "this minute is full" than to "this day is gone".
+            quotaScope: response.status === 429 ? (parseQuotaScope(body) ?? undefined) : undefined,
+          },
+        );
+
         if (RETRYABLE_STATUS.has(response.status) && attempt < this.maxAttempts) {
           const deadlineLeft = Math.max(0, deadline - Date.now());
           const waitMs = Math.min(backoffMs(this.retryDelayMs, attempt), deadlineLeft);
@@ -252,6 +271,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
             logger.warn("gemini.retrying", {
               provider: this.name,
               model: this.model,
+              label,
               status: response.status,
               attempt,
               maxAttempts: this.maxAttempts,
@@ -261,29 +281,22 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
             if (waitMs > 0) await delay(waitMs);
             continue;
           }
-          // Out of time — fall through to fail; the queue marks ANALYSIS_FAILED
-          // (parsed data preserved, retryable later, no re-scrape).
+          // Out of time — fall through and fail with what we have.
         }
         logger.warn("gemini.request_failed", {
           provider: this.name,
           model: this.model,
+          label,
           status: response.status,
           statusText: response.statusText,
           body: body.slice(0, 1000),
           attempt,
           durationMs,
         });
-        return this.fail({
-          status: response.status,
-          message: `Gemini request failed (${response.status} ${response.statusText})`,
-          // A 429 names the limit it hit; the pool reacts very differently to
-          // "this minute is full" than to "this day is gone".
-          quotaScope:
-            response.status === 429 ? (parseQuotaScope(body) ?? undefined) : undefined,
-        });
+        throw last;
       } catch (error) {
-        // A strict-mode failure we raised for a non-OK response must bubble out
-        // as-is (with its status), not be rewrapped as a transport error.
+        // A failure we raised for a non-OK response must bubble out as-is (with
+        // its status), not be rewrapped as a transport error.
         if (error instanceof AiCategoryProviderError) throw error;
 
         const durationMs = Date.now() - startedAt;
@@ -293,6 +306,7 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
           logger.warn("gemini.retrying", {
             provider: this.name,
             model: this.model,
+            label,
             error: message,
             attempt,
             maxAttempts: this.maxAttempts,
@@ -304,17 +318,80 @@ export class GeminiCategoryProvider implements AiCategoryProvider {
         logger.warn("gemini.request_error", {
           provider: this.name,
           model: this.model,
+          label,
           error: message,
           attempt,
           durationMs,
         });
-        return this.fail({ message: `Gemini request error: ${message}`, cause: error });
+        throw new AiCategoryProviderError(`Gemini request error: ${message}`, {
+          provider: this.name,
+          cause: error,
+        });
       } finally {
         clearTimeout(timeout);
       }
     }
 
-    return { ...EMPTY_AI_RESULT }; // unreachable; the loop always returns
+    // Out of attempts or out of time.
+    throw (
+      last ??
+      new AiCategoryProviderError(`Gemini request ran out of time before any attempt completed`, {
+        provider: this.name,
+      })
+    );
+  }
+
+  async analyze(
+    request: AiCategoryRequest,
+    options: AiCategoryAnalyzeOptions = {},
+  ): Promise<AiCategoryResult> {
+    try {
+      const text = await this.request(buildAiCategoryPrompt(request), options, "analyze");
+      const result = parseAiCategoryResult(text);
+      logger.info("gemini.analyze_parsed", {
+        provider: this.name,
+        model: this.model,
+        categories: result.categories.length,
+        hashtags: result.hashtags.length,
+      });
+      return result;
+    } catch (error) {
+      if (!(error instanceof AiCategoryProviderError)) throw error;
+      // Historical default: one flaky shop degrades to an empty result rather
+      // than crashing an import. Strict callers opt out.
+      if (this.throwOnFailure) throw error;
+      return { ...EMPTY_AI_RESULT };
+    }
+  }
+
+  /**
+   * Analyzes SEVERAL shops in one request.
+   *
+   * Always throws on failure, whatever `throwOnFailure` says: degrading a batch
+   * to an empty result would mark every shop in it as "analyzed, no categories"
+   * — a silent wrong answer for all of them at once. A thrown error leaves them
+   * retryable instead.
+   *
+   * A reply that arrives but does not validate is NOT retried. The HTTP call
+   * already succeeded, so a second one would spend another slot of a very small
+   * daily allowance to re-roll the same model at temperature 0.2; the items stay
+   * retryable and cost nothing in the meantime.
+   */
+  async analyzeBatch(
+    items: readonly AiBatchItem[],
+    options: AiCategoryAnalyzeOptions = {},
+  ): Promise<AiBatchResult> {
+    const handles = items.map((i) => i.handle);
+    const text = await this.request(buildAiBatchPrompt(items), options, "batch");
+    const batch = parseAiBatchResult(text, handles);
+    logger.info("gemini.batch_parsed", {
+      provider: this.name,
+      model: this.model,
+      size: items.length,
+      results: batch.results.size,
+      skipped: batch.skipped.length,
+    });
+    return batch;
   }
 }
 
