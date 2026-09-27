@@ -350,6 +350,45 @@ export interface AiBatchResult {
 }
 
 /**
+ * A provider that can answer for several shops in one call.
+ *
+ * Declared as a capability rather than checked with `instanceof` so the pool
+ * does not have to know which concrete providers exist — a local model and a
+ * hosted one are both simply "can do batch" or not.
+ */
+export interface AiBatchCapableProvider extends AiCategoryProvider {
+  analyzeBatch(
+    items: readonly AiBatchItem[],
+    options?: AiCategoryAnalyzeOptions,
+  ): Promise<AiBatchResult>;
+}
+
+/** Whether this provider can answer a whole batch in one call. */
+export function supportsBatchAnalysis(
+  provider: AiCategoryProvider,
+): provider is AiBatchCapableProvider {
+  return typeof (provider as Partial<AiBatchCapableProvider>).analyzeBatch === "function";
+}
+
+/**
+ * Strips a ``` or ```json fence when a model wraps its JSON in markdown.
+ *
+ * Hosted models honour a JSON response format; a local one often does not and
+ * answers in a fenced block instead. Unwrapping here means every provider can
+ * hand the same plain JSON to the shared parsers, rather than each one growing
+ * its own idea of what a reply looks like. Text without a fence is returned
+ * unchanged, so this is safe to run on any reply.
+ */
+export function stripJsonFence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return trimmed;
+  return trimmed
+    .replace(/^```(?:json)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/, "")
+    .trim();
+}
+
+/**
  * Raised when a batch reply cannot be trusted as a whole.
  *
  * A batch is all-or-nothing on VALIDITY: if one shop is missing, duplicated or

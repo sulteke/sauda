@@ -90,6 +90,40 @@ export function analysisBatchSize(): number {
   return positiveInt(process.env.ANALYSIS_BATCH_SIZE, DEFAULT_ANALYSIS_BATCH_SIZE);
 }
 
+// --- Local AI (development only) -------------------------------------------
+//
+// A model running on the developer's own machine, used as a LAST resort after
+// both Gemini projects. It exists so a Gemini outage does not stop local work;
+// it is off unless explicitly switched on, so production behaves exactly as it
+// did before this existed.
+
+export const DEFAULT_LOCAL_AI_BASE_URL = "http://127.0.0.1:1234";
+export const DEFAULT_LOCAL_AI_MODEL = "qwen/qwen3-8b";
+export const DEFAULT_LOCAL_AI_MAX_TOKENS = 4096;
+
+/**
+ * Whether the local model may be used at all.
+ *
+ * Requires the exact string "true": anything else — unset, empty, "1", "yes",
+ * a stray space — leaves it off. A local endpoint must never become reachable
+ * from production by accident, so the check refuses to be clever.
+ */
+export function localAiEnabled(): boolean {
+  return process.env.LOCAL_AI_ENABLED === "true";
+}
+
+export function localAiBaseUrl(): string {
+  return process.env.LOCAL_AI_BASE_URL || DEFAULT_LOCAL_AI_BASE_URL;
+}
+
+export function localAiModel(): string {
+  return process.env.LOCAL_AI_MODEL || DEFAULT_LOCAL_AI_MODEL;
+}
+
+export function localAiMaxTokens(): number {
+  return positiveInt(process.env.LOCAL_AI_MAX_TOKENS, DEFAULT_LOCAL_AI_MAX_TOKENS);
+}
+
 /** Time zone whose midnight rolls the provider's request allowance over. */
 export function quotaResetTimeZone(): string {
   return process.env.GEMINI_QUOTA_RESET_TZ || DEFAULT_QUOTA_RESET_TIME_ZONE;

@@ -3,6 +3,9 @@ import "server-only";
 import {
   geminiFallbackDailyLimit,
   geminiPrimaryDailyLimit,
+  localAiBaseUrl,
+  localAiEnabled,
+  localAiModel,
   providerCooldownMs,
   rateLimitCooldownMs,
 } from "@/config/limits";
@@ -14,12 +17,14 @@ import {
   type AiCategoryRequest,
   type AiCategoryResult,
   disabledAiCategoryProvider,
+  supportsBatchAnalysis,
 } from "@/lib/ai-category-provider";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 
 import { DailyAnalysisLimitError } from "./analysis-budget";
 import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
+import { LocalQwenCategoryProvider } from "./local-qwen-category-provider";
 import { exhaustBucket, ledgerUsage, reserveRequest } from "./request-ledger";
 
 /**
@@ -55,6 +60,14 @@ import { exhaustBucket, ledgerUsage, reserveRequest } from "./request-ledger";
 /** Stable ids, used for per-provider counting and cooldown rows. */
 export const PRIMARY_PROVIDER_ID = "primary";
 export const FALLBACK_PROVIDER_ID = "fallback";
+/** The developer's own machine — last in the pool, and only when switched on. */
+export const LOCAL_PROVIDER_ID = "local";
+/**
+ * Nominal ceiling for the local provider. It is never enforced (the entry is
+ * unmetered), and exists only so the shared usage shape has a number to report
+ * instead of a special case.
+ */
+const LOCAL_NOMINAL_DAILY_LIMIT = 1000;
 
 /**
  * The only statuses that are the REQUEST's fault rather than the project's: a
@@ -75,6 +88,14 @@ export interface PooledProvider {
   model: string;
   /** AI REQUESTS per quota day allowed on this project. */
   dailyLimit: number;
+  /**
+   * Whether this provider draws on an external allowance we have to count.
+   *
+   * False for a model running locally: it has no Google quota, so charging its
+   * calls to the request ledger would make the ledger lie about how much of
+   * Google's day is left. An unmetered provider is gated by cooldown alone.
+   */
+  metered: boolean;
   provider: AiCategoryProvider;
 }
 
@@ -182,6 +203,7 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
       projectId: primaryProject,
       model,
       dailyLimit,
+      metered: true,
       provider: new GeminiCategoryProvider(primaryKey, {
         ...shared,
         beforeRequest: reserve(PRIMARY_PROVIDER_ID, dailyLimit),
@@ -212,12 +234,28 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
         projectId: fallbackProject,
         model,
         dailyLimit,
+        metered: true,
         provider: new GeminiCategoryProvider(fallbackKey, {
           ...shared,
           beforeRequest: reserve(FALLBACK_PROVIDER_ID, dailyLimit),
         }),
       });
     }
+  }
+
+  // Last resort, development only. Appended AFTER both Gemini projects so it
+  // runs only when neither can — it is slower and smaller, and a local answer
+  // is worth having only when the alternative is no answer at all.
+  if (localAiEnabled()) {
+    providers.push({
+      id: LOCAL_PROVIDER_ID,
+      projectId: null,
+      model: localAiModel(),
+      dailyLimit: LOCAL_NOMINAL_DAILY_LIMIT,
+      metered: false,
+      provider: new LocalQwenCategoryProvider(),
+    });
+    logger.info("ai.pool.local_enabled", { model: localAiModel(), baseUrl: localAiBaseUrl() });
   }
 
   return providers;
@@ -269,13 +307,17 @@ export async function providerUsage(
   // Requests SENT, from the ledger — not finished analyses. Google's allowance
   // counts every request, so a counter built on successes reads far too low.
   const ledger = await ledgerUsage(
-    providers.map((p) => ({ provider: p.id, model: p.model, limit: p.dailyLimit })),
+    providers
+      .filter((p) => p.metered)
+      .map((p) => ({ provider: p.id, model: p.model, limit: p.dailyLimit })),
     now,
   );
   const usedById = new Map(ledger.map((row) => [row.provider, row.used]));
 
   return providers.map((entry) => {
-    const used = usedById.get(entry.id) ?? 0;
+    // An unmetered provider spends no external allowance, so it has nothing to
+    // have used and nothing to run out of — only a cooldown can hold it back.
+    const used = entry.metered ? (usedById.get(entry.id) ?? 0) : 0;
     const raw = cooldowns.get(entry.id) ?? null;
     const cooldownUntil = raw && raw.getTime() > now.getTime() ? raw : null;
     return {
@@ -285,7 +327,7 @@ export async function providerUsage(
       used,
       limit: entry.dailyLimit,
       cooldownUntil,
-      available: used < entry.dailyLimit && cooldownUntil === null,
+      available: cooldownUntil === null && (!entry.metered || used < entry.dailyLimit),
     };
   });
 }
@@ -508,9 +550,7 @@ export async function analyzeBatchWithPool(
   const { value, providerId, providerName } = await withProviderFailover(
     (entry, budgetMs) => {
       const provider = entry.provider;
-      if (!(provider instanceof GeminiCategoryProvider)) {
-        // Only the Gemini provider speaks batch today. Saying so plainly beats
-        // a cast that would fail somewhere less obvious.
+      if (!supportsBatchAnalysis(provider)) {
         throw new AiCategoryProviderError(
           `Provider ${entry.id} does not support batch analysis.`,
           { provider: entry.id },

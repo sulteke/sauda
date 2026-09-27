@@ -81,10 +81,12 @@ import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-catego
 import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
 
 import {
+  analyzeBatchWithPool,
   analyzeWithPool,
   anyProviderAvailable,
   configuredProviders,
   FALLBACK_PROVIDER_ID,
+  LOCAL_PROVIDER_ID,
   NoProviderAvailableError,
   PRIMARY_PROVIDER_ID,
   providerUsage,
@@ -109,6 +111,9 @@ const ENV = [
   "GEMINI_PROVIDER_COOLDOWN_MINUTES",
   "GEMINI_RETRY_DELAY_MS",
   "GEMINI_POOL_MAX_ATTEMPTS",
+  "LOCAL_AI_ENABLED",
+  "LOCAL_AI_BASE_URL",
+  "LOCAL_AI_MODEL",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -818,5 +823,152 @@ describe("AUDIT — maximum requests per boutique (2 attempts)", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(httpError(400)));
     await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
     expect(spent()).toBe(1);
+  });
+});
+
+/**
+ * A local model is a development escape hatch for the days Gemini spends
+ * returning 503. It must be invisible unless switched on, must never be
+ * charged against Google's allowance, and must come last — it is the answer
+ * of last resort, not a shortcut past the better models.
+ */
+describe("local provider (development fallback)", () => {
+  beforeEach(configureBothProjects);
+
+  /** Which endpoint a call went to: the two Gemini keys, or the local server. */
+  const targetOf = (call: unknown[]) => {
+    const url = String(call[0]);
+    if (url.includes("127.0.0.1") || url.includes("localhost")) return "LOCAL";
+    return url.includes("key-a") ? "A" : "B";
+  };
+  const localReply = () =>
+    ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({ categories: [], hashtags: [] }) } }],
+      }),
+      text: async () => "",
+    }) as unknown as Response;
+
+  it("is ABSENT by default — production sees the pool it has always seen", () => {
+    expect(configuredProviders().map((p) => p.id)).toEqual([
+      PRIMARY_PROVIDER_ID,
+      FALLBACK_PROVIDER_ID,
+    ]);
+  });
+
+  it.each(["", "false", "1", "yes", "TRUE"])(
+    "stays absent when LOCAL_AI_ENABLED is %o — only the exact string enables it",
+    (value) => {
+      process.env.LOCAL_AI_ENABLED = value;
+      expect(configuredProviders().map((p) => p.id)).not.toContain(LOCAL_PROVIDER_ID);
+    },
+  );
+
+  it("appears LAST when enabled", () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    expect(configuredProviders().map((p) => p.id)).toEqual([
+      PRIMARY_PROVIDER_ID,
+      FALLBACK_PROVIDER_ID,
+      LOCAL_PROVIDER_ID,
+    ]);
+  });
+
+  it("is unmetered — it draws on no Google allowance", () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    const local = configuredProviders().find((p) => p.id === LOCAL_PROVIDER_ID)!;
+    expect(local.metered).toBe(false);
+    expect(local.projectId).toBeNull();
+  });
+
+  it("runs only after BOTH Gemini projects have failed", async () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(httpError(503)) // A, attempt 1
+      .mockResolvedValueOnce(httpError(503)) // A, attempt 2
+      .mockResolvedValueOnce(httpError(503)) // B, attempt 1
+      .mockResolvedValueOnce(httpError(503)) // B, attempt 2
+      .mockResolvedValueOnce(localReply());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(LOCAL_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(targetOf)).toEqual(["A", "A", "B", "B", "LOCAL"]);
+  });
+
+  it("is NOT reached while a Gemini project can still answer", async () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    const fetchMock = vi.fn().mockResolvedValue(ok());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(PRIMARY_PROVIDER_ID);
+    expect(fetchMock.mock.calls.map(targetOf)).toEqual(["A"]);
+  });
+
+  it("takes NO ledger slot — the Google counter is untouched by a local call", async () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    // Both Gemini projects are spent, so only the local one can run.
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    const fetchMock = vi.fn().mockResolvedValue(localReply());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await analyzeWithPool(request());
+
+    expect(outcome.providerId).toBe(LOCAL_PROVIDER_ID);
+    // Only the two Gemini rows exist, both exactly where they were seeded.
+    expect(ledger.rows.size).toBe(2);
+    expect(ledger.client.create).not.toHaveBeenCalled();
+    expect(ledger.client.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("serves a BATCH too, once both Gemini projects are spent", async () => {
+    process.env.LOCAL_AI_ENABLED = "true";
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  results: { a: { categories: [], hashtags: [] } },
+                  skipped: [],
+                }),
+              },
+            },
+          ],
+        }),
+        text: async () => "",
+      } as unknown as Response),
+    );
+
+    const { batch, providerId } = await analyzeBatchWithPool([
+      { handle: "a", request: request() },
+    ]);
+
+    expect(providerId).toBe(LOCAL_PROVIDER_ID);
+    expect(batch.results.has("a")).toBe(true);
+  });
+
+  it("still refuses when the local model is off and both projects are spent", async () => {
+    ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
