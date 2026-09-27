@@ -100,6 +100,15 @@ export function analysisBatchSize(): number {
 export const DEFAULT_LOCAL_AI_BASE_URL = "http://127.0.0.1:1234";
 export const DEFAULT_LOCAL_AI_MODEL = "qwen/qwen3-8b";
 export const DEFAULT_LOCAL_AI_MAX_TOKENS = 4096;
+/**
+ * How long one local call may take.
+ *
+ * An 8B model on a laptop answers a three-shop batch in roughly 60-90 seconds —
+ * an order of magnitude slower than hosted Gemini. This is deliberately generous
+ * because the alternative is aborting a call that WOULD have succeeded; a local
+ * model has no quota to protect, so patience costs nothing but time.
+ */
+export const DEFAULT_LOCAL_AI_TIMEOUT_MS = 180_000;
 
 /**
  * Whether the local model may be used at all.
@@ -112,6 +121,18 @@ export function localAiEnabled(): boolean {
   return process.env.LOCAL_AI_ENABLED === "true";
 }
 
+/**
+ * Run the pool on the LOCAL model alone, skipping Gemini entirely.
+ *
+ * For development against a local database, where the point is to exercise the
+ * real workflow without spending a hosted quota that a shared free tier hands
+ * out twenty of a day. Requires localAiEnabled() as well, so one flag can never
+ * silently disable Gemini on its own.
+ */
+export function localAiOnly(): boolean {
+  return localAiEnabled() && process.env.LOCAL_AI_ONLY === "true";
+}
+
 export function localAiBaseUrl(): string {
   return process.env.LOCAL_AI_BASE_URL || DEFAULT_LOCAL_AI_BASE_URL;
 }
@@ -122,6 +143,19 @@ export function localAiModel(): string {
 
 export function localAiMaxTokens(): number {
   return positiveInt(process.env.LOCAL_AI_MAX_TOKENS, DEFAULT_LOCAL_AI_MAX_TOKENS);
+}
+
+/**
+ * Wall-clock ceiling for a single local call, used by BOTH the provider's own
+ * abort timer and the pool's per-provider budget.
+ *
+ * One source of truth on purpose: when the pool's cap was a Gemini-shaped
+ * constant, it cut local calls off at 28s — well before a model that needs 77s
+ * could answer — and the failure looked like a broken provider rather than an
+ * impatient caller.
+ */
+export function localAiTimeoutMs(): number {
+  return positiveInt(process.env.LOCAL_AI_TIMEOUT_MS, DEFAULT_LOCAL_AI_TIMEOUT_MS);
 }
 
 /** Time zone whose midnight rolls the provider's request allowance over. */

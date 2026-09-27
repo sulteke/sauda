@@ -1,6 +1,6 @@
 import "server-only";
 
-import { localAiBaseUrl, localAiMaxTokens, localAiModel } from "@/config/limits";
+import { localAiBaseUrl, localAiMaxTokens, localAiModel, localAiTimeoutMs } from "@/config/limits";
 import {
   type AiBatchItem,
   type AiBatchResult,
@@ -41,10 +41,54 @@ import { logger } from "@/lib/logger";
  */
 const NO_THINK = "/no_think";
 
+/**
+ * Worked examples, shown to the local model only.
+ *
+ * These exist because a small model gets three specific things wrong that a
+ * hosted one does not, and all three are matters of STYLE rather than rules —
+ * so no amount of extra rule prose fixes them, but seeing correct answers does:
+ *
+ *   1. It marks every category 100. Real confidence is a judgement, and the
+ *      pipeline drops anything under 60, so a flat 100 throws away the only
+ *      signal the field carries.
+ *   2. It writes English summaries from Russian shops, because its instruction
+ *      tuning leans English.
+ *   3. It omits the audience tag even when the bio states it outright.
+ *
+ * Deliberately short: four examples covering audience (stated three ways and
+ * NOT stated), a spread of confidence, and a Russian summary written from an
+ * English source. Every id and tag below is from the project's own taxonomy —
+ * nothing here invents a category or a hashtag.
+ *
+ * This is appended by the LOCAL provider only. The shared prompt is untouched,
+ * so Gemini's behaviour — and production — is exactly as it was.
+ */
+const FEW_SHOT = [
+  "WORKED EXAMPLES — study these, then answer for the real data below in the same style.",
+  "Each example shows the object for ONE shop. When several shops are requested, this same object goes under that shop's handle inside \"results\".",
+  "",
+  'Example A — bio: "Женская одежда. Худи и футболки. Иногда бывают джинсы."',
+  '{"categories":[{"id":"hudi","confidence":95,"reason":"Худи названы прямо в описании."},{"id":"futbolki","confidence":95,"reason":"Футболки названы прямо в описании."},{"id":"dzhinsy","confidence":70,"reason":"Джинсы упомянуты как нерегулярный товар."}],"hashtags":["#Женскаяодежда","#Худи","#Футболки"],"city":null,"mall":null,"address":null,"targetAudience":"Женщины","priceSegment":null,"style":null,"summary":"Магазин женской одежды: худи, футболки, иногда джинсы."}',
+  "",
+  'Example B — bio: "Мужская одежда. Худи и футболки."',
+  '{"categories":[{"id":"hudi","confidence":95,"reason":"Худи названы прямо в описании."},{"id":"futbolki","confidence":95,"reason":"Футболки названы прямо в описании."}],"hashtags":["#Мужскаяодежда","#Худи","#Футболки"],"city":null,"mall":null,"address":null,"targetAudience":"Мужчины","priceSegment":null,"style":null,"summary":"Магазин мужской одежды: худи и футболки."}',
+  "",
+  'Example C — bio in English: "Unisex streetwear. Hoodies and t-shirts. New drop every week."',
+  '{"categories":[{"id":"hudi","confidence":95,"reason":"Hoodies названы прямо в описании."},{"id":"futbolki","confidence":95,"reason":"T-shirts названы прямо в описании."}],"hashtags":["#Унисексодежда","#Худи","#Футболки"],"city":null,"mall":null,"address":null,"targetAudience":"Унисекс","priceSegment":null,"style":"Streetwear","summary":"Унисекс-бренд уличной одежды: худи и футболки, регулярные новинки."}',
+  "Note on C: the profile is written in English, but the summary, targetAudience and reasons are STILL Russian. Always write them in Russian.",
+  "",
+  'Example D — bio: "Худи и футболки. Доставка по Алматы." (audience NOT stated)',
+  '{"categories":[{"id":"hudi","confidence":95,"reason":"Худи названы прямо в описании."},{"id":"futbolki","confidence":95,"reason":"Футболки названы прямо в описании."}],"hashtags":["#Худи","#Футболки"],"city":"Алматы","mall":null,"address":null,"targetAudience":null,"priceSegment":null,"style":null,"summary":"Магазин худи и футболок с доставкой по Алматы."}',
+  "Note on D: no audience tag, because the profile never says who it is for. Never guess a gender.",
+  "",
+  "What these examples demonstrate:",
+  "- Confidence is a JUDGEMENT, not a formality: something stated outright is 90-100, something mentioned once or in passing is 65-85. Do not mark everything 100.",
+  '- The audience tag follows what the profile SAYS: #Женскаяодежда, #Мужскаяодежда or #Унисексодежда when stated, and NO audience tag at all when it is not.',
+  '- "summary", "targetAudience", "priceSegment", "style" and every "reason" are written in RUSSIAN, whatever language the profile is in.',
+].join("\n");
+
 /** Local models have no shared load to wait out, so one attempt is the honest number. */
 const MAX_ATTEMPTS = 1;
-/** A local server is either up or it is not; this only stops a hang. */
-const DEFAULT_TIMEOUT_MS = 120_000;
 
 interface ChatCompletionResponse {
   choices?: { message?: { content?: string | null } }[];
@@ -69,7 +113,7 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
     this.baseUrl = (options.baseUrl ?? localAiBaseUrl()).replace(/\/+$/, "");
     this.model = options.model ?? localAiModel();
     this.maxTokens = options.maxTokens ?? localAiMaxTokens();
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs ?? localAiTimeoutMs();
   }
 
   private endpoint(): string {
@@ -103,7 +147,10 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
           model: this.model,
           temperature: 0.2,
           max_tokens: this.maxTokens,
-          messages: [{ role: "user", content: `${NO_THINK}\n\n${prompt}` }],
+          // Order matters: the worked examples set the style, then the shared
+          // prompt's rules and the real data come LAST, immediately before the
+          // answer. The shared prompt itself is never modified.
+          messages: [{ role: "user", content: `${NO_THINK}\n\n${FEW_SHOT}\n\n${prompt}` }],
         }),
         signal: controller.signal,
       });

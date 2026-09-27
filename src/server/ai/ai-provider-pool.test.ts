@@ -76,9 +76,11 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { DEFAULT_LOCAL_AI_TIMEOUT_MS } from "@/config/limits";
 import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-category-provider";
 
 import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
+import { LocalQwenCategoryProvider } from "./local-qwen-category-provider";
 
 import {
   analyzeBatchWithPool,
@@ -112,8 +114,10 @@ const ENV = [
   "GEMINI_RETRY_DELAY_MS",
   "GEMINI_POOL_MAX_ATTEMPTS",
   "LOCAL_AI_ENABLED",
+  "LOCAL_AI_ONLY",
   "LOCAL_AI_BASE_URL",
   "LOCAL_AI_MODEL",
+  "LOCAL_AI_TIMEOUT_MS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -970,5 +974,67 @@ describe("local provider (development fallback)", () => {
 
     await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * REGRESSION — the pool used to cap every provider at one Gemini-shaped
+   * constant (28s). An 8B model on a laptop answers a three-shop batch in
+   * 60-90s, so every local call was aborted at 28s: the queue item became
+   * ANALYSIS_FAILED and the local provider was parked in cooldown, all for a
+   * call that would have succeeded. The cap now belongs to the provider.
+   */
+  describe("time budget — per provider, not one number for all", () => {
+    /** budgetMs handed to each local call, in order. */
+    const localBudgets = (spy: { mock: { calls: unknown[][] } }) =>
+      spy.mock.calls.map((c) => (c[1] as { budgetMs: number }).budgetMs);
+
+    it("gives a local call its OWN timeout, far above the Gemini cap", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      process.env.LOCAL_AI_ONLY = "true"; // local is the whole pool
+      const analyzeSpy = vi.spyOn(LocalQwenCategoryProvider.prototype, "analyze");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(localReply()));
+
+      const outcome = await analyzeWithPool(request());
+
+      expect(outcome.providerId).toBe(LOCAL_PROVIDER_ID);
+      // The number that matters: comfortably past the 77s a real batch takes,
+      // and nowhere near the 28s that used to abort it.
+      expect(localBudgets(analyzeSpy)[0]!).toBe(DEFAULT_LOCAL_AI_TIMEOUT_MS);
+      expect(localBudgets(analyzeSpy)[0]!).toBeGreaterThan(28_000);
+    });
+
+    it("honours LOCAL_AI_TIMEOUT_MS, so a slower machine needs no code change", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      process.env.LOCAL_AI_ONLY = "true";
+      process.env.LOCAL_AI_TIMEOUT_MS = "240000";
+      const analyzeSpy = vi.spyOn(LocalQwenCategoryProvider.prototype, "analyze");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(localReply()));
+
+      await analyzeWithPool(request());
+
+      expect(localBudgets(analyzeSpy)[0]!).toBe(240_000);
+    });
+
+    it("does NOT loosen Gemini's cap just because the local model is enabled", async () => {
+      // The pool's own deadline grows to fit the slowest provider. That must not
+      // become permission for a Gemini project to overrun the serverless route.
+      process.env.LOCAL_AI_ENABLED = "true";
+      const geminiSpy = vi.spyOn(GeminiCategoryProvider.prototype, "analyze");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ok()));
+
+      await analyzeWithPool(request());
+
+      const budgets = geminiSpy.mock.calls.map((c) => (c[1] as { budgetMs: number }).budgetMs);
+      expect(budgets).toHaveLength(1);
+      expect(budgets[0]!).toBeLessThanOrEqual(28_000);
+    });
+
+    it("leaves the Gemini-only pool exactly as it was — production is untouched", () => {
+      const ids = configuredProviders().map((p) => p.id);
+      expect(ids).toEqual([PRIMARY_PROVIDER_ID, FALLBACK_PROVIDER_ID]);
+      for (const entry of configuredProviders()) {
+        expect(entry.maxBudgetMs).toBe(28_000);
+      }
+    });
   });
 });

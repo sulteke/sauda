@@ -560,7 +560,9 @@ export async function applyAnalysisResult(
 
   logger.info("import.analyze_metrics", {
     handle: job.handle,
-    aiProvider: "gemini",
+    // `providerId` alone, on purpose: a hardcoded aiProvider:"gemini" used to
+    // sit here and reported "gemini" for every batch, including runs that the
+    // local model had actually served.
     providerId,
     path: "batch",
     categories: detection.autoDetected.length,

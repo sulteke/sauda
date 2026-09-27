@@ -6,6 +6,8 @@ import {
   localAiBaseUrl,
   localAiEnabled,
   localAiModel,
+  localAiOnly,
+  localAiTimeoutMs,
   providerCooldownMs,
   rateLimitCooldownMs,
 } from "@/config/limits";
@@ -96,6 +98,18 @@ export interface PooledProvider {
    * Google's day is left. An unmetered provider is gated by cooldown alone.
    */
   metered: boolean;
+  /**
+   * The longest a single call to THIS provider may run.
+   *
+   * Per provider rather than one shared constant, because the two kinds of
+   * provider are bounded by different things. A hosted Gemini call is bounded by
+   * the serverless route it runs inside, and by the need to leave a fallback
+   * enough time to try. A model on the developer's machine is bounded only by
+   * its own speed: it is an order of magnitude slower, it is the only provider
+   * in the pool when it runs, and dev has no route limit to respect. Charging it
+   * the Gemini budget aborted calls that were about to succeed.
+   */
+  maxBudgetMs: number;
   provider: AiCategoryProvider;
 }
 
@@ -170,6 +184,19 @@ const PROVIDER_MAX_BUDGET_MS = 28_000;
 const MIN_PROVIDER_BUDGET_MS = 6_000;
 
 /**
+ * Budget for the whole pooled call, given the providers it will actually use.
+ *
+ * With Gemini alone this is POOL_BUDGET_MS unchanged — the serverless route is
+ * the binding constraint and nothing about production moves. It only grows when
+ * a provider's own ceiling is higher than that, which today means the local
+ * model: it is slower than the route would allow, but it is also dev-only
+ * (localAiEnabled() gates it) so no deployed request can reach this branch.
+ */
+function poolBudgetFor(providers: readonly PooledProvider[]): number {
+  return providers.reduce((budget, p) => Math.max(budget, p.maxBudgetMs), POOL_BUDGET_MS);
+}
+
+/**
  * Builds the ordered provider list from the environment.
  *
  * `GEMINI_API_KEY` still works as the primary, so an environment that predates
@@ -196,7 +223,17 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
   // left when each project's turn comes.
   const shared = { throwOnFailure: options.throwOnFailure, maxAttempts: pooledMaxAttempts() };
 
-  if (primaryKey) {
+  // Development only: run on the local model alone. Gemini entries are simply
+  // never built, so nothing downstream has to know about the mode — the pool
+  // just happens to contain one provider.
+  const geminiDisabled = localAiOnly();
+  if (geminiDisabled) {
+    logger.warn("ai.pool.gemini_skipped", {
+      reason: "LOCAL_AI_ONLY=true — development mode, Gemini is not configured into the pool.",
+    });
+  }
+
+  if (primaryKey && !geminiDisabled) {
     const dailyLimit = geminiPrimaryDailyLimit();
     providers.push({
       id: PRIMARY_PROVIDER_ID,
@@ -204,6 +241,7 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
       model,
       dailyLimit,
       metered: true,
+      maxBudgetMs: PROVIDER_MAX_BUDGET_MS,
       provider: new GeminiCategoryProvider(primaryKey, {
         ...shared,
         beforeRequest: reserve(PRIMARY_PROVIDER_ID, dailyLimit),
@@ -211,7 +249,7 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
     });
   }
 
-  if (fallbackKey) {
+  if (fallbackKey && !geminiDisabled) {
     if (primaryKey && fallbackKey === primaryKey) {
       // The same key is the same project — it adds no quota at all.
       logger.warn("ai.pool.duplicate_key", {
@@ -235,6 +273,7 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
         model,
         dailyLimit,
         metered: true,
+        maxBudgetMs: PROVIDER_MAX_BUDGET_MS,
         provider: new GeminiCategoryProvider(fallbackKey, {
           ...shared,
           beforeRequest: reserve(FALLBACK_PROVIDER_ID, dailyLimit),
@@ -253,6 +292,10 @@ export function configuredProviders(options: { throwOnFailure?: boolean } = {}):
       model: localAiModel(),
       dailyLimit: LOCAL_NOMINAL_DAILY_LIMIT,
       metered: false,
+      // Its own timeout, not the Gemini cap: the same number the provider arms
+      // its abort timer with, so the pool never gives up on a call the provider
+      // itself is still willing to wait for.
+      maxBudgetMs: localAiTimeoutMs(),
       provider: new LocalQwenCategoryProvider(),
     });
     logger.info("ai.pool.local_enabled", { model: localAiModel(), baseUrl: localAiBaseUrl() });
@@ -413,7 +456,7 @@ async function withProviderFailover<T>(
 
   const usage = await providerUsage(providers);
   const byId = new Map(usage.map((u) => [u.id, u]));
-  const poolDeadline = Date.now() + POOL_BUDGET_MS;
+  const poolDeadline = Date.now() + poolBudgetFor(providers);
   let lastError: unknown;
   let attempted = 0;
 
@@ -431,7 +474,7 @@ async function withProviderFailover<T>(
       continue;
     }
 
-    const budgetMs = Math.min(poolDeadline - Date.now(), PROVIDER_MAX_BUDGET_MS);
+    const budgetMs = Math.min(poolDeadline - Date.now(), entry.maxBudgetMs);
     if (budgetMs < MIN_PROVIDER_BUDGET_MS) {
       // Whatever ran before used the request's time; starting here would only
       // abort mid-flight. The item stays retryable, with nothing spent.
