@@ -845,13 +845,30 @@ describe("local provider (development fallback)", () => {
     if (url.includes("127.0.0.1") || url.includes("localhost")) return "LOCAL";
     return url.includes("key-a") ? "A" : "B";
   };
+  /**
+   * A successful local analysis. It carries a real category on purpose: the
+   * local provider treats a reply that parses to nothing as a failure, because
+   * a small model answering in prose used to be stored as a finished analysis
+   * with nothing in it. These tests are about routing and budgets, so the reply
+   * has to be one that genuinely succeeded.
+   */
   const localReply = () =>
     ({
       ok: true,
       status: 200,
       statusText: "OK",
       json: async () => ({
-        choices: [{ message: { content: JSON.stringify({ categories: [], hashtags: [] }) } }],
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                categories: [{ id: "dzhinsy", confidence: 90, reason: "джинсы" }],
+                hashtags: [],
+                summary: "Магазин женской одежды.",
+              }),
+            },
+          },
+        ],
       }),
       text: async () => "",
     }) as unknown as Response;

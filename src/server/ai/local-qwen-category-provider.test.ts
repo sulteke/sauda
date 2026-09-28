@@ -134,13 +134,20 @@ describe("LocalQwenCategoryProvider — single analysis", () => {
     expect(result.hashtags).toEqual(["#Джинсы"]);
   });
 
-  it("degrades malformed JSON to an empty result, exactly as Gemini does", async () => {
+  /**
+   * This used to assert the opposite — that malformed JSON degraded to an empty
+   * result "exactly as Gemini does". That symmetry read well and was wrong in
+   * practice: Gemini rarely answers in prose, a small local model does it
+   * routinely, and the empty result was stored as a finished analysis with
+   * nothing recording a failure. The local provider is deliberately stricter
+   * than the shared parser now.
+   */
+  it("REFUSES malformed JSON rather than degrading it to an empty result", async () => {
     fetchMock.mockResolvedValue(reply("I think this shop sells jeans!"));
 
-    const result = await new LocalQwenCategoryProvider().analyze(request());
-
-    expect(result.categories).toEqual([]);
-    expect(result.hashtags).toEqual([]);
+    await expect(new LocalQwenCategoryProvider().analyze(request())).rejects.toBeInstanceOf(
+      AiCategoryProviderError,
+    );
   });
 });
 
@@ -385,5 +392,106 @@ describe("LocalQwenCategoryProvider — batch", () => {
     const content = (sentBody().messages as { content: string }[])[0]!.content;
     expect(content.startsWith("/no_think")).toBe(true);
     expect(content).toContain("EXACTLY ONCE");
+  });
+});
+
+describe("LocalQwenCategoryProvider — prompt size", () => {
+  /** A profile the scraper really produces: 20 posts, long captions. */
+  const bigRequest = (): AiCategoryRequest => ({
+    ...request(),
+    captions: Array.from({ length: 20 }, (_, i) => `Пост ${i} ` + "описание товара ".repeat(60)),
+    hashtags: Array.from({ length: 120 }, (_, i) => `#tag${i}`),
+    mentions: Array.from({ length: 80 }, (_, i) => `@user${i}`),
+  });
+
+  /** The prompt the provider actually sent. */
+  const sentPrompt = () => (sentBody().messages as { content: string }[])[0]!.content;
+
+  /**
+   * REGRESSION — captions were sent for all twenty scraped posts with no
+   * ceiling, so a shop that writes long posts built a 23k-character prompt:
+   * past what an 8k window holds however small the batch. Three of five real
+   * profiles measured that way.
+   */
+  it("caps a huge profile so the prompt fits a local context window", async () => {
+    fetchMock.mockResolvedValue(reply(SINGLE_JSON));
+    const provider = new LocalQwenCategoryProvider();
+
+    await provider.analyze(bigRequest());
+
+    // The untrimmed profile alone is over 20k characters; with the taxonomy and
+    // the worked examples the prompt has to stay far below that to fit.
+    expect(sentPrompt().length).toBeLessThan(14_000);
+  });
+
+  it("keeps the bio and the first captions — it removes repetition, not evidence", async () => {
+    fetchMock.mockResolvedValue(reply(SINGLE_JSON));
+    const provider = new LocalQwenCategoryProvider();
+
+    await provider.analyze(bigRequest());
+    const prompt = sentPrompt();
+
+    expect(prompt).toContain("Женская одежда Алматы"); // the bio, whole
+    expect(prompt).toContain("Пост 0");
+    expect(prompt).toContain("Пост 9");
+    expect(prompt).not.toContain("Пост 19"); // past the cap
+  });
+
+  it("leaves a small profile completely untouched", async () => {
+    fetchMock.mockResolvedValue(reply(SINGLE_JSON));
+    const provider = new LocalQwenCategoryProvider();
+
+    await provider.analyze(request());
+
+    // The one caption the small request carries survives verbatim, ellipsis-free.
+    expect(sentPrompt()).toContain("джинсы");
+    expect(sentPrompt()).not.toContain("…");
+  });
+
+  it("trims inside a batch too, where the overflow was first seen", async () => {
+    fetchMock.mockResolvedValue(
+      reply(JSON.stringify({ results: { a: JSON.parse(SINGLE_JSON) }, skipped: [] })),
+    );
+    const provider = new LocalQwenCategoryProvider();
+
+    await provider.analyzeBatch([{ handle: "a", request: bigRequest() }]);
+
+    expect(sentPrompt().length).toBeLessThan(14_000);
+  });
+});
+
+describe("LocalQwenCategoryProvider — a reply that parsed to nothing", () => {
+  /**
+   * REGRESSION — a small model sometimes answers in prose instead of JSON. The
+   * shared parser reads that as an empty result, so the shop was stored as
+   * analyzed "successfully" with no categories, no hashtags and no summary, and
+   * nothing anywhere recorded a failure.
+   */
+  it("throws when the model answered, but not with anything usable", async () => {
+    fetchMock.mockResolvedValue(
+      reply("Конечно! Вот анализ магазина: он продаёт разные товары для дома."),
+    );
+    const provider = new LocalQwenCategoryProvider();
+
+    await expect(provider.analyze(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
+    await expect(provider.analyze(request())).rejects.toThrow(/no usable analysis/i);
+  });
+
+  it("accepts a result that carries only a summary — one field is enough", async () => {
+    fetchMock.mockResolvedValue(
+      reply(JSON.stringify({ categories: [], hashtags: [], summary: "Магазин товаров для дома." })),
+    );
+    const provider = new LocalQwenCategoryProvider();
+
+    const result = await provider.analyze(request());
+    expect(result.summary).toBe("Магазин товаров для дома.");
+  });
+
+  it("still accepts a normal, fully populated answer", async () => {
+    fetchMock.mockResolvedValue(reply(SINGLE_JSON));
+    const provider = new LocalQwenCategoryProvider();
+
+    const result = await provider.analyze(request());
+    expect(result.categories.map((c) => c.id)).toEqual(["dzhinsy"]);
   });
 });

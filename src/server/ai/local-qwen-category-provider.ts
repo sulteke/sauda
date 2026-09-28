@@ -87,6 +87,59 @@ const FEW_SHOT = [
   '- "summary", "targetAudience", "priceSegment", "style" and every "reason" are written in RUSSIAN, whatever language the profile is in.',
 ].join("\n");
 
+/**
+ * Caps on the variable part of a local prompt.
+ *
+ * The taxonomy — every category and every allowed hashtag — is a fixed cost in
+ * every prompt. What is NOT fixed is the profile: captions are sent for all
+ * twenty scraped posts with no ceiling anywhere, so a shop that writes long
+ * posts builds a prompt twice the size of a shop that writes short ones. Three
+ * of five real profiles measured at 20-23k characters, past what an 8k window
+ * can hold however small the batch, and raising the window only moves the wall.
+ *
+ * Trimming here rather than in the shared builder keeps Gemini's prompt exactly
+ * as it was — it has context to spare and no reason to see less.
+ *
+ * Ten captions is not a guess at "enough text": the categorical signal lives in
+ * the bio and the hashtags, which are kept whole, and a shop's twentieth post
+ * advertises much the same goods as its tenth. What the cap removes is
+ * repetition, not evidence.
+ */
+const MAX_CAPTIONS = 10;
+const MAX_CAPTION_CHARS = 400;
+const MAX_HASHTAGS = 40;
+const MAX_MENTIONS = 20;
+
+/** Cuts at a word boundary where it can, so a caption does not end mid-word. */
+function clip(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  return `${space > limit * 0.6 ? cut.slice(0, space) : cut}…`;
+}
+
+/**
+ * Bounds one request so the prompt built from it fits a local context window.
+ *
+ * Returns the SAME object when nothing needed trimming, so the common case
+ * carries no cost and the logs stay quiet about profiles that were already
+ * small enough.
+ */
+function trimForLocalContext(request: AiCategoryRequest): AiCategoryRequest {
+  const tooManyCaptions = request.captions.length > MAX_CAPTIONS;
+  const longCaption = request.captions.some((c) => c.length > MAX_CAPTION_CHARS);
+  const tooManyTags = request.hashtags.length > MAX_HASHTAGS;
+  const tooManyMentions = request.mentions.length > MAX_MENTIONS;
+  if (!tooManyCaptions && !longCaption && !tooManyTags && !tooManyMentions) return request;
+
+  return {
+    ...request,
+    captions: request.captions.slice(0, MAX_CAPTIONS).map((c) => clip(c, MAX_CAPTION_CHARS)),
+    hashtags: request.hashtags.slice(0, MAX_HASHTAGS),
+    mentions: request.mentions.slice(0, MAX_MENTIONS),
+  };
+}
+
 /** Local models have no shared load to wait out, so one attempt is the honest number. */
 const MAX_ATTEMPTS = 1;
 
@@ -278,8 +331,46 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
     request: AiCategoryRequest,
     options: AiCategoryAnalyzeOptions = {},
   ): Promise<AiCategoryResult> {
-    const text = await this.request(buildAiCategoryPrompt(request), options, "analyze");
+    const trimmed = trimForLocalContext(request);
+    if (trimmed !== request) {
+      logger.info("local_ai.request_trimmed", {
+        provider: this.name,
+        handle: request.username,
+        captions: `${request.captions.length} → ${trimmed.captions.length}`,
+        hashtags: `${request.hashtags.length} → ${trimmed.hashtags.length}`,
+      });
+    }
+    const text = await this.request(buildAiCategoryPrompt(trimmed), options, "analyze");
     const result = parseAiCategoryResult(text);
+
+    /**
+     * A reply that parsed to NOTHING is a failure, not an empty answer.
+     *
+     * `parseAiCategoryResult` answers text it cannot read with an empty result,
+     * which is the right call for a hosted model that occasionally omits a
+     * field — but a small local one sometimes returns hundreds of tokens of
+     * prose instead of JSON, and that came back as a shop analyzed
+     * "successfully" with no categories, no hashtags and no summary, stamped
+     * done and stored. A real answer always carries at least one of the three;
+     * nothing at all means the reply was never usable, and the item should stay
+     * retryable instead of being quietly written off.
+     */
+    const empty =
+      result.categories.length === 0 && result.hashtags.length === 0 && !result.summary;
+    if (empty && text.trim()) {
+      logger.warn("local_ai.unparsed_reply", {
+        provider: this.name,
+        model: this.model,
+        handle: request.username,
+        replyChars: text.length,
+        preview: text.slice(0, 200),
+      });
+      throw new AiCategoryProviderError(
+        "Local AI returned a reply that carried no usable analysis — it did not answer in JSON.",
+        { provider: this.name },
+      );
+    }
+
     logger.info("local_ai.analyze_parsed", {
       provider: this.name,
       categories: result.categories.length,
@@ -298,7 +389,20 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
     options: AiCategoryAnalyzeOptions = {},
   ): Promise<AiBatchResult> {
     const handles = items.map((i) => i.handle);
-    const text = await this.request(buildAiBatchPrompt(items), options, "batch");
+    const trimmed = items.map((item) => {
+      const request = trimForLocalContext(item.request);
+      return request === item.request ? item : { ...item, request };
+    });
+    const trimmedCount = trimmed.filter((item, i) => item !== items[i]).length;
+    if (trimmedCount > 0) {
+      logger.info("local_ai.request_trimmed", {
+        provider: this.name,
+        label: "batch",
+        trimmed: `${trimmedCount}/${items.length}`,
+      });
+    }
+
+    const text = await this.request(buildAiBatchPrompt(trimmed), options, "batch");
     const batch = parseAiBatchResult(text, handles);
     logger.info("local_ai.batch_parsed", {
       provider: this.name,
