@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useInvalidateDiscoveryCandidates } from "@/hooks/use-discovery";
 
 /** The venue used to verify the integration end-to-end before a wider run. */
 const APORT_WEST = { name: "Aport Mall West", id: "9430047375099302" };
@@ -48,6 +49,7 @@ export function GisDiscoveryForm() {
   const [limit, setLimit] = useState(String(DEFAULT_TEST_LIMIT));
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<GisResult | null>(null);
+  const refreshCandidates = useInvalidateDiscoveryCandidates();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -70,6 +72,9 @@ export function GisDiscoveryForm() {
       if (!res.ok || !json.data) throw new Error(json.error ?? "2GIS discovery failed");
 
       setResult(json.data);
+      // The candidates this run just created live in the table below and gate
+      // the Start Import button; without this they stay invisible until reload.
+      await refreshCandidates();
       toast.success(
         `${json.data.storesFound} stores · ${json.data.newCandidates} new candidate${json.data.newCandidates === 1 ? "" : "s"}`,
       );

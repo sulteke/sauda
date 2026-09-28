@@ -37,6 +37,22 @@ export function useDiscoveryCandidates() {
   });
 }
 
+/**
+ * Refreshes the candidate list after something OUTSIDE these mutations created
+ * candidates.
+ *
+ * 2GIS discovery posts to its own endpoint rather than going through
+ * useRunDiscovery, so it never invalidated this cache: a venue could produce
+ * twenty-eight candidates, the run could report them, and the list underneath
+ * would still read "No candidates yet" with Start Import greyed out until the
+ * page was reloaded. Exported as a hook rather than the key itself, so a second
+ * caller cannot drift onto a different string.
+ */
+export function useInvalidateDiscoveryCandidates() {
+  const queryClient = useQueryClient();
+  return () => queryClient.invalidateQueries({ queryKey: CANDIDATES_KEY });
+}
+
 export function useRunDiscovery() {
   const queryClient = useQueryClient();
   return useMutation({
