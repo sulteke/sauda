@@ -18,7 +18,12 @@ import { parseInstagramHandle } from "@/server/import/instagram-url";
 import { parseInstagramProfile } from "@/services/import.service";
 import type { ImportQueueItemDTO } from "@/types";
 
-function toDTO(row: ImportQueue): ImportQueueItemDTO {
+/**
+ * `analyzedBy` lives on the JOB, not the queue row, so it is passed in by the
+ * callers that joined it. Defaults to null, which is also the truth for a row
+ * that has not been analyzed yet.
+ */
+function toDTO(row: ImportQueue, analyzedBy: string | null = null): ImportQueueItemDTO {
   return {
     id: row.id,
     instagramUrl: row.instagramUrl,
@@ -26,6 +31,7 @@ function toDTO(row: ImportQueue): ImportQueueItemDTO {
     error: row.error,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    analyzedBy,
   };
 }
 
@@ -43,7 +49,11 @@ async function existingBoutiqueHandles(handles: readonly string[]): Promise<Set<
   if (handles.length === 0) return new Set();
   const rows = await prisma.boutique.findMany({
     // One OR per handle, each insensitive — `in` does not honour `mode`.
-    where: { OR: handles.map((handle) => ({ instagramHandle: { equals: handle, mode: "insensitive" as const } })) },
+    where: {
+      OR: handles.map((handle) => ({
+        instagramHandle: { equals: handle, mode: "insensitive" as const },
+      })),
+    },
     select: { instagramHandle: true },
   });
   return new Set(
@@ -103,7 +113,21 @@ export async function addUrlsToQueue(
 export async function listQueue(): Promise<ImportQueueItemDTO[]> {
   try {
     const rows = await prisma.importQueue.findMany({ orderBy: { createdAt: "desc" } });
-    return rows.map(toDTO);
+
+    // Which project analyzed each row. One extra query rather than a per-row
+    // join: the queue page is a list, and N+1 here would be N+1 over the wire.
+    const jobIds = rows.map((r) => r.importJobId).filter((id): id is string => Boolean(id));
+    const jobs = jobIds.length
+      ? await prisma.importJob.findMany({
+          where: { id: { in: jobIds } },
+          select: { id: true, analyzedBy: true },
+        })
+      : [];
+    const byJob = new Map(jobs.map((j) => [j.id, j.analyzedBy]));
+
+    return rows.map((row) =>
+      toDTO(row, row.importJobId ? (byJob.get(row.importJobId) ?? null) : null),
+    );
   } catch (error) {
     console.error("Failed to list import queue:", error);
     return [];
@@ -128,12 +152,7 @@ const SUCCESS_STATUSES = ["READY_FOR_REVIEW", "COMPLETED"] as const;
  */
 const FAILED_STATUSES = ["PARSE_FAILED", "ANALYSIS_FAILED", "FAILED"] as const;
 /** Statuses with work still to do (not yet complete, not failed). */
-const ACTIONABLE_STATUSES = [
-  "PENDING_PARSE",
-  "PARSING",
-  "PENDING_ANALYSIS",
-  "ANALYZING",
-] as const;
+const ACTIONABLE_STATUSES = ["PENDING_PARSE", "PARSING", "PENDING_ANALYSIS", "ANALYZING"] as const;
 
 /** What a bulk clear targets. "ALL" removes every row regardless of status. */
 export type ClearQueueScope = "COMPLETED" | "FAILED" | "ALL";
@@ -326,7 +345,9 @@ export async function processNextImport(): Promise<ProcessResult> {
         processed: false,
         item: null,
         remaining,
-        ...(temporary ? { retryAfter: budget.retryAfter!.toISOString() } : { dailyLimitReached: true }),
+        ...(temporary
+          ? { retryAfter: budget.retryAfter!.toISOString() }
+          : { dailyLimitReached: true }),
         analyzedToday: budget.used,
       };
     }
@@ -500,7 +521,11 @@ async function runAnalyzeBatchStage(
         where: { id: row.id },
         data: { status: "ANALYSIS_FAILED", error: message },
       });
-      logger.warn("queue.analyze_finished", { id: row.id, status: "ANALYSIS_FAILED", error: message });
+      logger.warn("queue.analyze_finished", {
+        id: row.id,
+        status: "ANALYSIS_FAILED",
+        error: message,
+      });
       done.push(toDTO(updated));
       continue;
     }
@@ -564,7 +589,9 @@ async function runAnalyzeBatchStage(
       item: done[0] ?? null,
       items: done,
       remaining,
-      ...(temporary ? { retryAfter: budget.retryAfter!.toISOString() } : { dailyLimitReached: true }),
+      ...(temporary
+        ? { retryAfter: budget.retryAfter!.toISOString() }
+        : { dailyLimitReached: true }),
       analyzedToday: budget.used,
     };
   }
@@ -580,7 +607,11 @@ async function runAnalyzeBatchStage(
       const job = await prepareAnalysisJob(row.importJobId);
       const key = job.handle.toLocaleLowerCase("en-US");
       if (seenHandles.has(key)) {
-        logger.info("queue.analyze_deferred", { id: row.id, handle: job.handle, reason: "duplicate handle in batch" });
+        logger.info("queue.analyze_deferred", {
+          id: row.id,
+          handle: job.handle,
+          reason: "duplicate handle in batch",
+        });
         continue;
       }
       seenHandles.add(key);
@@ -592,7 +623,11 @@ async function runAnalyzeBatchStage(
         where: { id: row.id },
         data: { status: "ANALYSIS_FAILED", error: message },
       });
-      logger.warn("queue.analyze_finished", { id: row.id, status: "ANALYSIS_FAILED", error: message });
+      logger.warn("queue.analyze_finished", {
+        id: row.id,
+        status: "ANALYSIS_FAILED",
+        error: message,
+      });
       done.push(toDTO(updated));
     }
   }

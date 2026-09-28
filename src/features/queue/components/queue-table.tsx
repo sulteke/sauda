@@ -58,6 +58,21 @@ const STATUS_VARIANT: Record<
   FAILED: "destructive",
 };
 
+/**
+ * How each provider id reads in the table.
+ *
+ * Shops are routed by size now — small ones to the model on this machine, large
+ * ones to a Gemini project — and without this the two are indistinguishable
+ * afterwards: "the local model handled everything" and "Gemini quietly took
+ * half the queue" look exactly the same.
+ */
+const PROVIDER_LABEL: Record<string, string> = {
+  local: "Qwen (local)",
+  primary: "Gemini",
+  fallback: "Gemini (fallback)",
+  disabled: "—",
+};
+
 /** Failed statuses that can be retried from the row. */
 const RETRYABLE: ReadonlySet<ImportQueueStatus> = new Set([
   "PARSE_FAILED",
@@ -107,6 +122,7 @@ export function QueueTable() {
           <TableRow>
             <TableHead>Instagram URL</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead>Analyzed by</TableHead>
             <TableHead>Detail</TableHead>
             <TableHead>Added</TableHead>
             <TableHead className="w-10 text-right">
@@ -125,6 +141,11 @@ export function QueueTable() {
               </TableCell>
               <TableCell>
                 <Badge variant={STATUS_VARIANT[item.status]}>{STATUS_LABEL[item.status]}</Badge>
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                {/* Empty until an analysis succeeds — a queued or failed row has
+                    no provider to name, and a dash would read like a result. */}
+                {item.analyzedBy ? (PROVIDER_LABEL[item.analyzedBy] ?? item.analyzedBy) : ""}
               </TableCell>
               <TableCell className="max-w-[280px] truncate text-xs text-destructive">
                 {item.error ?? ""}

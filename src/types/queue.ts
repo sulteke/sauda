@@ -24,4 +24,14 @@ export interface ImportQueueItemDTO {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Which project actually analyzed this shop — "local" for the model on this
+   * machine, "primary"/"fallback" for a Gemini project. Null until an analysis
+   * succeeds.
+   *
+   * It matters now that size decides where a shop goes: without it the two
+   * cannot be told apart, and "the local model handled everything" and "Gemini
+   * quietly took half the queue" look identical from the outside.
+   */
+  analyzedBy: string | null;
 }
