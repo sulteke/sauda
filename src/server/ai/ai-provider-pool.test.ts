@@ -29,22 +29,29 @@ const { jobCount, cooldownFindMany, cooldownUpsert, ledger } = vi.hoisted(() => 
       seed: (provider: string, model: string, used: number) =>
         rows.set(key(provider, model), { provider, model, day: "test", used }),
       client: {
-        findMany: vi.fn(async ({ where }: { where: { OR: { provider: string; model: string }[] } }) =>
-          [...rows.values()].filter((r) =>
-            where.OR.some((p) => p.provider === r.provider && p.model === r.model),
-          ),
+        findMany: vi.fn(
+          async ({ where }: { where: { OR: { provider: string; model: string }[] } }) =>
+            [...rows.values()].filter((r) =>
+              where.OR.some((p) => p.provider === r.provider && p.model === r.model),
+            ),
         ),
         findUnique: vi.fn(async ({ where }: { where: { provider_model_day: Where } }) => {
           const w = where.provider_model_day;
           return rows.get(key(w.provider, w.model)) ?? null;
         }),
         updateMany: vi.fn(bump),
-        create: vi.fn(async ({ data }: { data: { provider: string; model: string; day: string; used: number } }) => {
-          const k = key(data.provider, data.model);
-          if (rows.has(k)) throw new Error("unique constraint");
-          rows.set(k, { ...data });
-          return data;
-        }),
+        create: vi.fn(
+          async ({
+            data,
+          }: {
+            data: { provider: string; model: string; day: string; used: number };
+          }) => {
+            const k = key(data.provider, data.model);
+            if (rows.has(k)) throw new Error("unique constraint");
+            rows.set(k, { ...data });
+            return data;
+          },
+        ),
         upsert: vi.fn(
           async ({
             where,
@@ -76,7 +83,7 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
-import { DEFAULT_LOCAL_AI_TIMEOUT_MS } from "@/config/limits";
+import { DEFAULT_LOCAL_AI_TIMEOUT_MS, DEFAULT_LOCAL_MAX_PROFILE_CHARS } from "@/config/limits";
 import { AiCategoryProviderError, type AiCategoryRequest } from "@/lib/ai-category-provider";
 
 import { DEFAULT_GEMINI_MODEL, GeminiCategoryProvider } from "./gemini-category-provider";
@@ -91,6 +98,7 @@ import {
   LOCAL_PROVIDER_ID,
   NoProviderAvailableError,
   PRIMARY_PROVIDER_ID,
+  profileChars,
   providerUsage,
 } from "./ai-provider-pool";
 
@@ -118,6 +126,7 @@ const ENV = [
   "LOCAL_AI_BASE_URL",
   "LOCAL_AI_MODEL",
   "LOCAL_AI_TIMEOUT_MS",
+  "LOCAL_MAX_PROFILE_CHARS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -146,6 +155,32 @@ const request = (): AiCategoryRequest => ({
 });
 
 /** A Gemini HTTP reply. */
+/** A Gemini-shaped BATCH reply answering exactly these handles. */
+const okBatch = (handles: string[]) =>
+  ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  results: Object.fromEntries(
+                    handles.map((h) => [h, { categories: [], hashtags: [] }]),
+                  ),
+                  skipped: [],
+                }),
+              },
+            ],
+          },
+        },
+      ],
+      usageMetadata: {},
+    }),
+  }) as unknown as Response;
+
 const ok = () =>
   ({
     ok: true,
@@ -383,7 +418,10 @@ describe("failover between projects", () => {
     // mid-flight ("This operation was aborted") even though the primary had
     // failed in under a second.
     const analyzeSpy = vi.spyOn(GeminiCategoryProvider.prototype, "analyze");
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()),
+    );
 
     await analyzeWithPool(request());
 
@@ -424,7 +462,10 @@ describe("cooldown", () => {
   beforeEach(configureBothProjects);
 
   it("parks the failing project with the status that caused it", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(httpError(429)).mockResolvedValueOnce(ok()),
+    );
 
     await analyzeWithPool(request());
 
@@ -549,7 +590,10 @@ describe("429 is two different failures", () => {
   it("per-DAY: burns the rest of the project's ledger and does not cool it down", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValueOnce(httpError(429, quotaBody("PerDay"))).mockResolvedValueOnce(ok()),
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(429, quotaBody("PerDay")))
+        .mockResolvedValueOnce(ok()),
     );
 
     const outcome = await analyzeWithPool(request());
@@ -581,7 +625,10 @@ describe("429 is two different failures", () => {
   it("an unlabelled 429 keeps the cautious default cooldown", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValueOnce(httpError(429, '{"error":{"code":429}}')).mockResolvedValueOnce(ok()),
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(429, '{"error":{"code":429}}'))
+        .mockResolvedValueOnce(ok()),
     );
 
     const before = Date.now();
@@ -693,7 +740,11 @@ describe("AUDIT — request ledger accounting", () => {
     const aborted = () => Object.assign(new Error("aborted"), { name: "AbortError" });
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockRejectedValueOnce(aborted()).mockRejectedValueOnce(aborted()).mockResolvedValueOnce(ok()),
+      vi
+        .fn()
+        .mockRejectedValueOnce(aborted())
+        .mockRejectedValueOnce(aborted())
+        .mockResolvedValueOnce(ok()),
     );
     await analyzeWithPool(request());
     expect(used(PRIMARY_PROVIDER_ID)).toBe(2); // both failed attempts charged
@@ -782,7 +833,11 @@ describe("AUDIT — maximum requests per boutique (2 attempts)", () => {
   it("primary transient, fallback succeeds → 3", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(httpError(503)).mockResolvedValueOnce(ok()),
+      vi
+        .fn()
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(httpError(503))
+        .mockResolvedValueOnce(ok()),
     );
     await analyzeWithPool(request());
     expect(spent()).toBe(3);
@@ -975,9 +1030,7 @@ describe("local provider (development fallback)", () => {
       } as unknown as Response),
     );
 
-    const { batch, providerId } = await analyzeBatchWithPool([
-      { handle: "a", request: request() },
-    ]);
+    const { batch, providerId } = await analyzeBatchWithPool([{ handle: "a", request: request() }]);
 
     expect(providerId).toBe(LOCAL_PROVIDER_ID);
     expect(batch.results.has("a")).toBe(true);
@@ -991,6 +1044,95 @@ describe("local provider (development fallback)", () => {
 
     await expect(analyzeWithPool(request())).rejects.toBeInstanceOf(NoProviderAvailableError);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The 8B model does not merely answer an oversized profile worse — it fails,
+   * and one of its failure modes took LM Studio's backend down, which stopped
+   * every shop queued behind it. Measured: everything it analyzed successfully
+   * was at or under ~6,200 characters of profile text; everything from ~13,400
+   * up failed.
+   */
+  describe("size routing — a large profile is not the local model's job", () => {
+    const big = (): AiCategoryRequest => ({
+      ...request(),
+      // Well past DEFAULT_LOCAL_MAX_PROFILE_CHARS (16 chars x 800 = 12,800).
+      captions: ["описание товара ".repeat(800)],
+    });
+
+    it("skips the local model for a large profile and uses Gemini", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      const fetchMock = vi.fn().mockResolvedValue(ok());
+      vi.stubGlobal("fetch", fetchMock);
+
+      const outcome = await analyzeWithPool(big());
+
+      expect(outcome.providerId).toBe(PRIMARY_PROVIDER_ID);
+      expect(fetchMock.mock.calls.map(targetOf)).toEqual(["A"]);
+    });
+
+    it("still falls to the local model for a SMALL profile", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(localReply()));
+
+      const outcome = await analyzeWithPool(request());
+
+      expect(outcome.providerId).toBe(LOCAL_PROVIDER_ID);
+    });
+
+    it("does NOT fall to the local model for a large profile, even when Gemini is spent", async () => {
+      // The whole point: an oversized profile must not reach it at all.
+      process.env.LOCAL_AI_ENABLED = "true";
+      ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(analyzeWithPool(big())).rejects.toBeInstanceOf(NoProviderAvailableError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("honours LOCAL_MAX_PROFILE_CHARS", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      process.env.LOCAL_MAX_PROFILE_CHARS = "100000"; // nothing is "large" now
+      ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(localReply()));
+
+      const outcome = await analyzeWithPool(big());
+
+      expect(outcome.providerId).toBe(LOCAL_PROVIDER_ID);
+    });
+
+    it("measures the SHOP, not the taxonomy — an empty profile is never large", () => {
+      const bare = { ...request(), biography: null, captions: [], hashtags: [], mentions: [] };
+      expect(profileChars(bare)).toBe(0);
+      expect(profileChars(big())).toBeGreaterThan(DEFAULT_LOCAL_MAX_PROFILE_CHARS);
+    });
+
+    it("sums a BATCH — shops share one prompt, so their sizes add up", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      const half = (): AiCategoryRequest => ({
+        ...request(),
+        captions: ["описание ".repeat(400)], // each under the limit alone
+      });
+      expect(profileChars(half())).toBeLessThan(DEFAULT_LOCAL_MAX_PROFILE_CHARS);
+
+      const fetchMock = vi.fn().mockResolvedValue(okBatch(["a", "b", "c"]));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { providerId } = await analyzeBatchWithPool([
+        { handle: "a", request: half() },
+        { handle: "b", request: half() },
+        { handle: "c", request: half() },
+      ]);
+
+      // Three of them together are over the limit, so Gemini takes the batch.
+      expect(providerId).toBe(PRIMARY_PROVIDER_ID);
+      expect(fetchMock.mock.calls.map(targetOf)).toEqual(["A"]);
+    });
   });
 
   /**

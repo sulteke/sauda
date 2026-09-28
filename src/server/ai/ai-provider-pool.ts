@@ -8,6 +8,7 @@ import {
   localAiModel,
   localAiOnly,
   localAiTimeoutMs,
+  localMaxProfileChars,
   providerCooldownMs,
   rateLimitCooldownMs,
 } from "@/config/limits";
@@ -194,6 +195,55 @@ const MIN_PROVIDER_BUDGET_MS = 6_000;
  */
 function poolBudgetFor(providers: readonly PooledProvider[]): number {
   return providers.reduce((budget, p) => Math.max(budget, p.maxBudgetMs), POOL_BUDGET_MS);
+}
+
+/**
+ * The parts of a request whose size follows the SHOP rather than the taxonomy.
+ *
+ * The category dictionary and the hashtag whitelist are in every prompt at the
+ * same size, so counting them would say nothing about which shop is large.
+ */
+export function profileChars(request: AiCategoryRequest): number {
+  return (
+    (request.biography?.length ?? 0) +
+    request.captions.reduce((n, c) => n + c.length, 0) +
+    request.hashtags.reduce((n, h) => n + h.length, 0) +
+    request.mentions.reduce((n, m) => n + m.length, 0)
+  );
+}
+
+/**
+ * Drops the local model from the pool for a profile too large for it.
+ *
+ * The 8B model does not merely answer such profiles worse — it fails, and one
+ * of the ways it fails takes LM Studio's whole backend down, stopping every
+ * shop queued behind it. A hosted model has the context for them, so the
+ * sensible split is by size rather than by preference.
+ *
+ * When the local model is the ONLY provider, the large profile is left with
+ * nothing and the caller gets NoProviderAvailableError. That is the honest
+ * outcome: better a retryable failure in a millisecond, saying why, than three
+ * minutes spent arriving at the same place with the server dead afterwards.
+ */
+function routeBySize(
+  providers: PooledProvider[],
+  chars: number | undefined,
+  context: Record<string, unknown>,
+): PooledProvider[] {
+  const limit = localMaxProfileChars();
+  if (chars === undefined || chars <= limit) return providers;
+
+  const withoutLocal = providers.filter((p) => p.id !== LOCAL_PROVIDER_ID);
+  if (withoutLocal.length === providers.length) return providers; // no local entry anyway
+
+  logger.info("ai.pool.local_skipped_by_size", {
+    ...context,
+    profileChars: chars,
+    limit,
+    remaining: withoutLocal.map((p) => p.id),
+    reason: "Profile is larger than the local model handles; leaving it to a hosted project.",
+  });
+  return withoutLocal;
 }
 
 /**
@@ -449,9 +499,13 @@ function shouldFailOver(error: unknown): boolean {
  */
 async function withProviderFailover<T>(
   run: (entry: PooledProvider, budgetMs: number) => Promise<T>,
-  options: { context?: Record<string, unknown> } = {},
+  options: { context?: Record<string, unknown>; profileChars?: number } = {},
 ): Promise<{ value: T; providerId: string; providerName: string }> {
-  const providers = configuredProviders({ throwOnFailure: true });
+  const providers = routeBySize(
+    configuredProviders({ throwOnFailure: true }),
+    options.profileChars,
+    options.context ?? {},
+  );
   const context = options.context ?? {};
 
   const usage = await providerUsage(providers);
@@ -510,8 +564,7 @@ async function withProviderFailover<T>(
         throw error;
       }
 
-      const quotaScope =
-        error instanceof AiCategoryProviderError ? error.quotaScope : undefined;
+      const quotaScope = error instanceof AiCategoryProviderError ? error.quotaScope : undefined;
 
       if (quotaScope === "per-day") {
         // The project's own count is authoritative and is ahead of ours. Spend
@@ -556,7 +609,7 @@ export async function analyzeWithPool(
 
   const { value, providerId, providerName } = await withProviderFailover(
     (entry, budgetMs) => entry.provider.analyze(request, { budgetMs }),
-    { context: options.context },
+    { context: options.context, profileChars: profileChars(request) },
   );
   return { result: value, providerId, providerName };
 }
@@ -594,10 +647,9 @@ export async function analyzeBatchWithPool(
     (entry, budgetMs) => {
       const provider = entry.provider;
       if (!supportsBatchAnalysis(provider)) {
-        throw new AiCategoryProviderError(
-          `Provider ${entry.id} does not support batch analysis.`,
-          { provider: entry.id },
-        );
+        throw new AiCategoryProviderError(`Provider ${entry.id} does not support batch analysis.`, {
+          provider: entry.id,
+        });
       }
       logger.info("ai.batch.attempt", {
         ...(options.context ?? {}),
@@ -610,7 +662,13 @@ export async function analyzeBatchWithPool(
       });
       return provider.analyzeBatch(items, { budgetMs });
     },
-    { context: { ...(options.context ?? {}), size: items.length, handles } },
+    {
+      context: { ...(options.context ?? {}), size: items.length, handles },
+      // The batch shares ONE prompt, so its size is the sum: a batch is too
+      // large for the local model as soon as its shops together are, not only
+      // when one of them is.
+      profileChars: items.reduce((n, item) => n + profileChars(item.request), 0),
+    },
   );
   logger.info("ai.batch.success", {
     ...(options.context ?? {}),
@@ -668,7 +726,11 @@ export function resolvePooledProvider(
   });
 
   if (providers.length === 0) {
-    return { name: disabledAiCategoryProvider.name, lastProviderId: null, analyze: (r) => disabledAiCategoryProvider.analyze(r) };
+    return {
+      name: disabledAiCategoryProvider.name,
+      lastProviderId: null,
+      analyze: (r) => disabledAiCategoryProvider.analyze(r),
+    };
   }
   return new PoolBackedProvider(options);
 }

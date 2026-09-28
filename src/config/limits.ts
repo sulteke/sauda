@@ -175,6 +175,33 @@ export function localAiMaxTokens(): number {
 }
 
 /**
+ * Profile size past which the local model stops being the right tool.
+ *
+ * Measured against what the 8B model actually did on real profiles. Everything
+ * it analyzed successfully came in at or under ~6,200 characters of profile
+ * text; everything from ~13,400 up failed, and in three different ways — one
+ * ran the full timeout without stopping, one answered at length in prose
+ * instead of JSON, and one took LM Studio's backend down with it, which
+ * stopped every shop queued behind it too.
+ *
+ * Ten thousand sits in that gap. It is not a promise: a small profile can
+ * still fail on how the model behaves rather than how much it was given — one
+ * at 1,677 characters did. What the threshold buys is that the failures which
+ * ARE about size stop happening, and that the one which takes the server down
+ * never gets the chance.
+ *
+ * Counts the parts that vary with the shop — bio, captions, hashtags, mentions
+ * — and not the taxonomy, which is the same in every prompt.
+ *
+ * Override: LOCAL_MAX_PROFILE_CHARS.
+ */
+export const DEFAULT_LOCAL_MAX_PROFILE_CHARS = 10_000;
+
+export function localMaxProfileChars(): number {
+  return positiveInt(process.env.LOCAL_MAX_PROFILE_CHARS, DEFAULT_LOCAL_MAX_PROFILE_CHARS);
+}
+
+/**
  * Wall-clock ceiling for a single local call, used by BOTH the provider's own
  * abort timer and the pool's per-provider budget.
  *
