@@ -16,6 +16,17 @@ export type ImportQueueStatus =
   | "COMPLETED"
   | "FAILED";
 
+/**
+ * One stage of the import, when the operator drives them separately.
+ *
+ * Left undefined, the queue picks the stage itself — analysis first, then
+ * parsing — which is what the single Process Queue button has always done.
+ * Naming a stage is for running them apart: scraping costs Apify credit and
+ * analysis costs time on whichever model the shop is routed to, and they are
+ * worth doing at different moments.
+ */
+export type QueueStage = "parse" | "analyze";
+
 /** Serializable view of a queued bulk-import URL. */
 export interface ImportQueueItemDTO {
   id: string;

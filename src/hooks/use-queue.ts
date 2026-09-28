@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { ImportQueueItemDTO } from "@/types";
+import type { ImportQueueItemDTO, QueueStage } from "@/types";
 
 const QUEUE_KEY = ["import-queue"] as const;
 
@@ -60,10 +60,22 @@ export interface ProcessResult {
   analyzedToday?: number;
 }
 
+/**
+ * Advances the queue by one stage.
+ *
+ * Called with no argument the queue picks the stage itself, as it always has.
+ * Pass "parse" or "analyze" to run just that one — scraping spends Apify
+ * credit and analysis spends time on the model, and the two are worth doing at
+ * different moments.
+ */
 export function useProcessNext() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => request<ProcessResult>("/api/queue/process-next", { method: "POST" }),
+    mutationFn: (stage?: QueueStage) =>
+      request<ProcessResult>("/api/queue/process-next", {
+        method: "POST",
+        body: JSON.stringify(stage ? { stage } : {}),
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QUEUE_KEY }),
   });
 }

@@ -22,7 +22,7 @@ export type {
   InstagramRelatedProfile,
 } from "./instagram";
 export type { BoutiquePreview, ImportJobDTO, ImportSource, ImportStatus } from "./import";
-export type { ImportQueueItemDTO, ImportQueueStatus } from "./queue";
+export type { ImportQueueItemDTO, ImportQueueStatus, QueueStage } from "./queue";
 export type {
   DiscoveryCandidateDTO,
   DiscoveryCandidateStatus,

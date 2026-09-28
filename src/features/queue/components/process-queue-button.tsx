@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { useProcessNext, useQueue } from "@/hooks/use-queue";
-import type { ImportQueueStatus } from "@/types";
+import type { ImportQueueStatus, QueueStage } from "@/types";
 
 /**
  * Pause between sequential process-next calls so the per-item Gemini analysis
@@ -42,6 +42,17 @@ const ACTIONABLE_STATUSES: ImportQueueStatus[] = [
   "ANALYZING",
 ];
 
+/** What a run of each kind can actually pick up, for the progress denominator. */
+const STAGE_STATUSES: Record<QueueStage, ImportQueueStatus[]> = {
+  parse: ["PENDING_PARSE", "PARSING"],
+  analyze: ["PENDING_ANALYSIS", "ANALYZING"],
+};
+
+const STAGE_LABEL: Record<QueueStage, string> = {
+  parse: "Parse only",
+  analyze: "Analyze only",
+};
+
 /** m:ss for the countdown shown while the run is parked on a cooldown. */
 function formatCountdown(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -67,6 +78,8 @@ export function ProcessQueueButton() {
   const processNext = useProcessNext();
   const { data: queueItems } = useQueue();
   const [running, setRunning] = useState(false);
+  /** Which kind of run is in flight, so only one can start and the label says which. */
+  const [runningStage, setRunningStage] = useState<QueueStage | "all" | null>(null);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   /** Seconds left on the current cooldown wait; 0 when not parked. */
   const [pausedFor, setPausedFor] = useState(0);
@@ -92,13 +105,23 @@ export function ProcessQueueButton() {
     return !stopRef.current;
   }
 
-  async function processAll() {
+  /**
+   * Runs the queue to completion, optionally restricted to ONE stage.
+   *
+   * Without a stage the queue chooses for itself, as it always has. With one,
+   * only that stage runs — scraping spends Apify credit and analysis spends
+   * time on whichever model a shop is routed to, so they are worth doing at
+   * different moments, and separately.
+   */
+  async function processAll(stage?: QueueStage) {
     // Best-effort initial denominator (self-corrects from each response below).
-    let total = (queueItems ?? []).filter((i) => ACTIONABLE_STATUSES.includes(i.status)).length;
+    const counted = stage ? STAGE_STATUSES[stage] : ACTIONABLE_STATUSES;
+    let total = (queueItems ?? []).filter((i) => counted.includes(i.status)).length;
     setProgress({ done: 0, total });
     setPausedFor(0);
     stopRef.current = false;
     setRunning(true);
+    setRunningStage(stage ?? "all");
 
     let succeeded = 0;
     let failed = 0;
@@ -113,7 +136,7 @@ export function ProcessQueueButton() {
     try {
       let keepGoing = true;
       while (keepGoing) {
-        const result = await processNext.mutateAsync();
+        const result = await processNext.mutateAsync(stage);
         remaining = result.remaining;
 
         // One call can settle a whole batch, so count every item it returned —
@@ -190,30 +213,59 @@ export function ProcessQueueButton() {
       toast.error(error instanceof Error ? error.message : "Processing failed");
     } finally {
       setRunning(false);
+      setRunningStage(null);
       setPausedFor(0);
     }
   }
 
+  /** The running label, which names the stage so two runs cannot be confused. */
+  function runningLabel() {
+    if (pausedFor > 0) {
+      return (
+        <>
+          <Pause className="h-4 w-4" />
+          Paused — resuming in {formatCountdown(pausedFor)}
+        </>
+      );
+    }
+    const what = runningStage && runningStage !== "all" ? `${STAGE_LABEL[runningStage]} — ` : "";
+    return (
+      <>
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {what}
+        {progress.done} / {progress.total}...
+      </>
+    );
+  }
+
   return (
-    <div className="flex items-center gap-2">
-      <Button onClick={processAll} disabled={running}>
-        {!running ? (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button onClick={() => processAll()} disabled={running}>
+        {running && runningStage === "all" ? (
+          runningLabel()
+        ) : (
           <>
             <Play className="h-4 w-4" />
             Process Queue
           </>
-        ) : pausedFor > 0 ? (
-          <>
-            <Pause className="h-4 w-4" />
-            Paused — resuming in {formatCountdown(pausedFor)}
-          </>
-        ) : (
-          <>
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Processing {progress.done} / {progress.total}...
-          </>
         )}
       </Button>
+
+      {/* The same loop, restricted to one stage. Only one run at a time: every
+          trigger is disabled while any of them is going. */}
+      {(["parse", "analyze"] as const).map((stage) => (
+        <Button key={stage} variant="outline" onClick={() => processAll(stage)} disabled={running}>
+          {running && runningStage === stage ? (
+            runningLabel()
+          ) : (
+            <>
+              <Play className="h-4 w-4" />
+              {STAGE_LABEL[stage]}
+            </>
+          )}
+        </Button>
+      ))}
+
       {running && (
         <Button variant="outline" onClick={() => (stopRef.current = true)}>
           <Square className="h-4 w-4" />

@@ -115,7 +115,12 @@ function resetAll() {
   boutiqueFindMany.mockResolvedValue([]);
   parseInstagramProfile.mockReset();
   analyzeImportJob.mockReset();
-  for (const fn of [analyzeBatchWithPool, prepareAnalysisJob, applyAnalysisResult, markAnalysisJobFailed])
+  for (const fn of [
+    analyzeBatchWithPool,
+    prepareAnalysisJob,
+    applyAnalysisResult,
+    markAnalysisJobFailed,
+  ])
     fn.mockReset();
   // findMany serves two callers now: stale recovery and picking the analyze
   // batch. Default both to empty; tests opt in with pendingAnalysis().
@@ -147,7 +152,16 @@ function resetAll() {
   jobCount.mockResolvedValue(0);
   anyProviderAvailable.mockResolvedValue({
     available: true,
-    usage: [{ id: "primary", projectId: "proj-a", used: 0, limit: 20, cooldownUntil: null, available: true }],
+    usage: [
+      {
+        id: "primary",
+        projectId: "proj-a",
+        used: 0,
+        limit: 20,
+        cooldownUntil: null,
+        available: true,
+      },
+    ],
   });
   update.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
     Promise.resolve({
@@ -187,7 +201,9 @@ describe("requeueStaleJobs", () => {
     const stuckAt = new Date(Date.now() - 11 * 60 * 1000);
     findMany.mockImplementation(({ where }: { where: { status: string } }) =>
       where.status === "PARSING"
-        ? Promise.resolve([{ id: "a", instagramUrl: "https://instagram.com/a", updatedAt: stuckAt }])
+        ? Promise.resolve([
+            { id: "a", instagramUrl: "https://instagram.com/a", updatedAt: stuckAt },
+          ])
         : Promise.resolve([]),
     );
     updateMany.mockResolvedValue({ count: 1 });
@@ -213,7 +229,9 @@ describe("requeueStaleJobs", () => {
     const stuckAt = new Date(Date.now() - 11 * 60 * 1000);
     findMany.mockImplementation(({ where }: { where: { status: string } }) =>
       where.status === "ANALYZING"
-        ? Promise.resolve([{ id: "b", instagramUrl: "https://instagram.com/b", updatedAt: stuckAt }])
+        ? Promise.resolve([
+            { id: "b", instagramUrl: "https://instagram.com/b", updatedAt: stuckAt },
+          ])
         : Promise.resolve([]),
     );
     updateMany.mockResolvedValue({ count: 1 });
@@ -248,7 +266,11 @@ describe("processNextImport", () => {
 
   it("parses the oldest PENDING_PARSE item (Apify only) and hands off to PENDING_ANALYSIS", async () => {
     // First findFirst (PENDING_ANALYSIS) → none; second (PENDING_PARSE) → a row.
-    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({
+      id: "p1",
+      instagramUrl: "https://instagram.com/p1",
+      importJobId: null,
+    });
     parseInstagramProfile.mockResolvedValue({ job: { id: "job-1" }, boutiqueId: "b1" });
     count.mockResolvedValue(0);
 
@@ -289,7 +311,11 @@ describe("processNextImport", () => {
   });
 
   it("marks PARSE_FAILED when Apify fails, without touching analysis", async () => {
-    findFirst.mockResolvedValueOnce({ id: "p2", instagramUrl: "https://instagram.com/p2", importJobId: null });
+    findFirst.mockResolvedValueOnce({
+      id: "p2",
+      instagramUrl: "https://instagram.com/p2",
+      importJobId: null,
+    });
     parseInstagramProfile.mockRejectedValue(new Error("Apify timed out"));
 
     await processNextImport();
@@ -400,8 +426,22 @@ function exhaustAllProviders() {
   anyProviderAvailable.mockResolvedValue({
     available: false,
     usage: [
-      { id: "primary", projectId: "proj-a", used: 20, limit: 20, cooldownUntil: null, available: false },
-      { id: "fallback", projectId: "proj-b", used: 20, limit: 20, cooldownUntil: null, available: false },
+      {
+        id: "primary",
+        projectId: "proj-a",
+        used: 20,
+        limit: 20,
+        cooldownUntil: null,
+        available: false,
+      },
+      {
+        id: "fallback",
+        projectId: "proj-b",
+        used: 20,
+        limit: 20,
+        cooldownUntil: null,
+        available: false,
+      },
     ],
   });
 }
@@ -464,7 +504,11 @@ describe("daily analysis limit", () => {
   });
 
   it("does not start a new Apify parse once the allowance is spent", async () => {
-    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({
+      id: "p1",
+      instagramUrl: "https://instagram.com/p1",
+      importJobId: null,
+    });
     exhaustAllProviders();
 
     const result = await processNextImport();
@@ -483,8 +527,22 @@ function coolDownAllProviders(primaryUntil: Date, fallbackUntil: Date) {
   anyProviderAvailable.mockResolvedValue({
     available: false,
     usage: [
-      { id: "primary", projectId: "proj-a", used: 3, limit: 20, cooldownUntil: primaryUntil, available: false },
-      { id: "fallback", projectId: "proj-b", used: 1, limit: 20, cooldownUntil: fallbackUntil, available: false },
+      {
+        id: "primary",
+        projectId: "proj-a",
+        used: 3,
+        limit: 20,
+        cooldownUntil: primaryUntil,
+        available: false,
+      },
+      {
+        id: "fallback",
+        projectId: "proj-b",
+        used: 1,
+        limit: 20,
+        cooldownUntil: fallbackUntil,
+        available: false,
+      },
     ],
   });
 }
@@ -529,8 +587,22 @@ describe("temporary provider cooldown (503/504) pauses instead of stopping", () 
       available: false,
       usage: [
         // Spent AND cooling down: waiting for it buys nothing — it is done for today.
-        { id: "primary", projectId: "proj-a", used: 20, limit: 20, cooldownUntil: soon, available: false },
-        { id: "fallback", projectId: "proj-b", used: 2, limit: 20, cooldownUntil: later, available: false },
+        {
+          id: "primary",
+          projectId: "proj-a",
+          used: 20,
+          limit: 20,
+          cooldownUntil: soon,
+          available: false,
+        },
+        {
+          id: "fallback",
+          projectId: "proj-b",
+          used: 2,
+          limit: 20,
+          cooldownUntil: later,
+          available: false,
+        },
       ],
     });
 
@@ -550,7 +622,11 @@ describe("temporary provider cooldown (503/504) pauses instead of stopping", () 
   });
 
   it("pauses the parse stage too, so no Apify credit is spent while waiting", async () => {
-    findFirst.mockResolvedValueOnce({ id: "p1", instagramUrl: "https://instagram.com/p1", importJobId: null });
+    findFirst.mockResolvedValueOnce({
+      id: "p1",
+      instagramUrl: "https://instagram.com/p1",
+      importJobId: null,
+    });
     coolDownAllProviders(soon, later);
 
     const result = await processNextImport();
@@ -724,7 +800,9 @@ describe("duplicate protection", () => {
 
     await processNextImport();
 
-    const statuses = update.mock.calls.map((c) => (c[0] as { data: { status: string } }).data.status);
+    const statuses = update.mock.calls.map(
+      (c) => (c[0] as { data: { status: string } }).data.status,
+    );
     expect(statuses).not.toContain("PARSING");
   });
 
@@ -804,7 +882,9 @@ describe("addUrlsToQueue duplicate filter", () => {
   it("queues ONLY the fresh URL", async () => {
     boutiqueFindMany.mockResolvedValue([{ instagramHandle: "qoima" }]);
 
-    await addUrlsToQueue(["https://instagram.com/qoima", "https://instagram.com/newshop"].join("\n"));
+    await addUrlsToQueue(
+      ["https://instagram.com/qoima", "https://instagram.com/newshop"].join("\n"),
+    );
 
     expect(queueCreateMany).toHaveBeenCalledWith({
       data: [{ instagramUrl: "https://instagram.com/newshop" }],
@@ -866,7 +946,11 @@ describe("batch analysis", () => {
       // PENDING_PARSE still has rows → keep filling the batch.
       Promise.resolve(where.status === "PENDING_PARSE" ? 5 : 0),
     );
-    findFirst.mockResolvedValue({ id: "p9", instagramUrl: "https://instagram.com/p9", importJobId: null });
+    findFirst.mockResolvedValue({
+      id: "p9",
+      instagramUrl: "https://instagram.com/p9",
+      importJobId: null,
+    });
     parseInstagramProfile.mockResolvedValue({ job: { id: "job-9" }, boutiqueId: "b9" });
 
     await processNextImport();
@@ -913,15 +997,16 @@ describe("batch analysis", () => {
 
   it("settles every shop in the batch, not just the first", async () => {
     pendingAnalysis(rows(3));
-    update.mockImplementation(({ where, data }: { where: { id: string }; data: { status: string } }) =>
-      Promise.resolve({
-        id: where.id,
-        instagramUrl: "u",
-        status: data.status,
-        error: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      }),
+    update.mockImplementation(
+      ({ where, data }: { where: { id: string }; data: { status: string } }) =>
+        Promise.resolve({
+          id: where.id,
+          instagramUrl: "u",
+          status: data.status,
+          error: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
     );
 
     const result = await processNextImport();
@@ -997,5 +1082,79 @@ describe("batch analysis", () => {
       where: { id: "q0" },
       data: { status: "SKIPPED_LOW_FOLLOWERS", error: expect.stringContaining("100") },
     });
+  });
+});
+
+describe("processNextImport — running the stages separately", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('"parse" never analyzes, even with a full batch waiting', async () => {
+    pendingAnalysis([
+      { id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-1" },
+      { id: "a2", instagramUrl: "https://instagram.com/a2", importJobId: "job-2" },
+      { id: "a3", instagramUrl: "https://instagram.com/a3", importJobId: "job-3" },
+    ]);
+    findFirst.mockResolvedValueOnce({
+      id: "p1",
+      instagramUrl: "https://instagram.com/p1",
+      importJobId: null,
+    });
+    parseInstagramProfile.mockResolvedValue({ job: { id: "job-9" }, boutiqueId: "b1" });
+
+    const result = await processNextImport("parse");
+
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
+    expect(parseInstagramProfile).toHaveBeenCalledTimes(1);
+    expect(result.processed).toBe(true);
+  });
+
+  /**
+   * The batch gate exists so the browser loop's parse-analyze alternation does
+   * not hand analysis one shop at a time. Asking for analysis explicitly is the
+   * opposite situation: the operator is not waiting for a batch to fill.
+   */
+  it('"analyze" runs a PARTIAL batch instead of holding for a full one', async () => {
+    process.env.ANALYSIS_BATCH_SIZE = "3";
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-1" }]);
+    // Something IS left to parse, which is exactly what normally holds the gate.
+    count.mockResolvedValue(5);
+
+    const result = await processNextImport("analyze");
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(result.processed).toBe(true);
+    delete process.env.ANALYSIS_BATCH_SIZE;
+  });
+
+  it('"analyze" with nothing to analyze does NOT fall through and scrape', async () => {
+    // A parse row is available; an unstaged call would happily spend Apify on it.
+    findFirst.mockResolvedValueOnce({
+      id: "p1",
+      instagramUrl: "https://instagram.com/p1",
+      importJobId: null,
+    });
+
+    const result = await processNextImport("analyze");
+
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
+    expect(result.processed).toBe(false);
+  });
+
+  it("without a stage, behaviour is exactly what it was — analysis first", async () => {
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-9" }]);
+
+    const result = await processNextImport();
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+    expect(result.processed).toBe(true);
   });
 });

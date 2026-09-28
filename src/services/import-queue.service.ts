@@ -16,7 +16,7 @@ import {
 } from "@/server/import/import-pipeline";
 import { parseInstagramHandle } from "@/server/import/instagram-url";
 import { parseInstagramProfile } from "@/services/import.service";
-import type { ImportQueueItemDTO } from "@/types";
+import type { ImportQueueItemDTO, QueueStage } from "@/types";
 
 /**
  * `analyzedBy` lives on the JOB, not the queue row, so it is passed in by the
@@ -292,8 +292,12 @@ export async function retryQueueItem(id: string): Promise<ImportQueueItemDTO> {
  * in-flight jobs are recovered first. A successful Parse hands straight off to
  * PENDING_ANALYSIS, so there is no intermediate resting state to promote.
  */
-export async function processNextImport(): Promise<ProcessResult> {
+export async function processNextImport(stage?: QueueStage): Promise<ProcessResult> {
   await requeueStaleJobs();
+
+  // "analyze" means analyze NOW, so the batch gate below is skipped for it: the
+  // operator asked for this stage explicitly and is not waiting for a batch to
+  // fill. "parse" skips the analysis stage entirely.
 
   // Analysis is a BATCH stage: one model request covers up to `batchSize`
   // shops, and that is the whole point. So it must not fire on the first
@@ -304,20 +308,31 @@ export async function processNextImport(): Promise<ProcessResult> {
   // when nothing is left to parse: a leftover of one or two would otherwise
   // wait forever, so it is flushed.
   const batchSize = analysisBatchSize();
-  const analyzeRows = await prisma.importQueue.findMany({
-    where: { status: "PENDING_ANALYSIS" },
-    orderBy: { createdAt: "asc" },
-    take: batchSize,
-    select: { id: true, instagramUrl: true, importJobId: true },
-  });
+  const analyzeRows =
+    stage === "parse"
+      ? []
+      : await prisma.importQueue.findMany({
+          where: { status: "PENDING_ANALYSIS" },
+          orderBy: { createdAt: "asc" },
+          take: batchSize,
+          select: { id: true, instagramUrl: true, importJobId: true },
+        });
   if (analyzeRows.length > 0) {
     const full = analyzeRows.length >= batchSize;
     // Count ONLY what the parse stage below will actually pick up. Falling
     // through to parse when nothing is PENDING_PARSE would report "queue done"
     // and strand the items we are holding, so the two must agree.
     const unparsed = await prisma.importQueue.count({ where: { status: "PENDING_PARSE" } });
-    if (full || unparsed === 0) return runAnalyzeBatchStage(analyzeRows);
+    if (stage === "analyze" || full || unparsed === 0) return runAnalyzeBatchStage(analyzeRows);
     // Otherwise fall through and parse the next profile, letting the batch fill.
+  }
+
+  // Asked for analysis and there is none left: say so rather than silently
+  // scraping a profile the operator did not ask to pay for.
+  if (stage === "analyze") {
+    const remaining = await prisma.importQueue.count({ where: { status: "PENDING_ANALYSIS" } });
+    logger.info("queue.finished", { reason: "nothing-to-analyze", stage });
+    return { processed: false, item: null, remaining };
   }
 
   // Stage 1 — start the next parse, unless today's AI allowance is already gone.
