@@ -132,9 +132,9 @@ describe("the hashtag work did not change any existing limit", () => {
     expect(dailyAnalysisLimit()).toBe(20);
   });
 
-  it("keeps the daily Telegram publication limit at 20", () => {
-    expect(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT).toBe(20);
-    expect(dailyTelegramPublishLimit()).toBe(20);
+  it("keeps the daily Telegram publication limit where the product set it", () => {
+    expect(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT).toBe(50);
+    expect(dailyTelegramPublishLimit()).toBe(50);
   });
 
   it("keeps the follower gate at 5,000", () => {

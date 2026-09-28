@@ -345,7 +345,7 @@ describe("the 2GIS run stays outside the AI and publishing budgets", () => {
 
   it("leaves the existing daily limits untouched", () => {
     expect(DEFAULT_DAILY_ANALYSIS_LIMIT).toBe(20);
-    expect(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT).toBe(20);
+    expect(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT).toBe(50);
     expect(DEFAULT_MIN_FOLLOWERS_FOR_ANALYSIS).toBe(5_000);
   });
 });

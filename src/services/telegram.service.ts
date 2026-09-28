@@ -341,3 +341,52 @@ export async function publishWithOverride(
     limit,
   };
 }
+
+/** Why requeueing a failed publication was refused. */
+export type RetryPublicationRejection = "NOT_FOUND" | "NOT_APPROVED" | "NOT_FAILED";
+
+export interface RetryPublicationResult {
+  ok: boolean;
+  rejection: RetryPublicationRejection | null;
+}
+
+/**
+ * Puts a FAILED publication back in the pending column so Publish Queue can try
+ * it again.
+ *
+ * Until this existed a failed publication was final: nothing in the app moved a
+ * boutique out of FAILED, so an outage, a missing token or a transient Telegram
+ * error stranded it there for good and the only way back was an UPDATE against
+ * the database. Failures here are routinely temporary — the channel was
+ * unreachable, the bot was not configured yet — so they need an ordinary way
+ * back into the queue.
+ *
+ * It only REQUEUES. Publishing stays with Publish Queue, which is where the
+ * daily limit and the channel's pacing are enforced; retrying does not post
+ * anything by itself and cannot be used to slip past either.
+ */
+export async function retryFailedPublication(
+  boutiqueId: string,
+): Promise<RetryPublicationResult> {
+  const existing = await prisma.boutique.findUnique({ where: { id: boutiqueId } });
+  if (!existing) return { ok: false, rejection: "NOT_FOUND" };
+  if (existing.status !== "APPROVED") return { ok: false, rejection: "NOT_APPROVED" };
+  // Deliberately narrow: PUBLISHED must not be re-sent to subscribers from
+  // here, and SKIPPED is a location decision that publishWithOverride owns.
+  if (existing.telegramStatus !== "FAILED") return { ok: false, rejection: "NOT_FAILED" };
+
+  await prisma.boutique.update({
+    where: { id: boutiqueId },
+    data: {
+      telegramStatus: "PENDING",
+      telegramError: null,
+      telegramFailure: Prisma.DbNull,
+    },
+  });
+  logger.info("publication.retry_requeued", {
+    boutiqueId,
+    previousError: existing.telegramError,
+  });
+
+  return { ok: true, rejection: null };
+}

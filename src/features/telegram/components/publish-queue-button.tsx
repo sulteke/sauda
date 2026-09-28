@@ -7,6 +7,20 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 
+/**
+ * Pause between publications.
+ *
+ * Telegram limits a chat by the MINUTE, so the daily ceiling protects nothing
+ * here — the shape that trips a 429 is a run that posts as fast as the server
+ * answers. Most posts are photo albums that take tens of seconds to upload and
+ * pace themselves, but a short one returns immediately, and a run of those is
+ * exactly what an unpaced loop would send. Three seconds is the floor that
+ * keeps even instant replies under twenty a minute; four leaves margin, and is
+ * the pause the import queue already uses for the same reason.
+ */
+const PUBLISH_DELAY_MS = 4000;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 interface ProcessResult {
   processed: boolean;
   remaining: number;
@@ -53,6 +67,9 @@ export function PublishQueueButton({ pending }: { pending: number }) {
           break;
         }
         keepGoing = result.processed && result.remaining > 0;
+        // Only BETWEEN publications — never after the last one, where it would
+        // just be dead time before the button re-enables.
+        if (keepGoing) await sleep(PUBLISH_DELAY_MS);
       }
       if (limitReached) {
         toast.message("Daily publication limit reached", {

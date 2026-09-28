@@ -14,7 +14,19 @@ function positiveInt(raw: string | undefined, fallback: number): number {
 
 export const DEFAULT_MIN_FOLLOWERS_FOR_ANALYSIS = 5_000;
 export const DEFAULT_DAILY_ANALYSIS_LIMIT = 20;
-export const DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT = 20;
+/**
+ * How many boutiques may be posted to the channel in a day.
+ *
+ * This is an editorial number, not a technical one — Telegram rate-limits a
+ * chat by the MINUTE, and nothing near this figure comes close to that. It sat
+ * at 20 only because it was written alongside the AI limit, which is 20 for a
+ * real reason (the provider's free tier allows that many requests a day). The
+ * two were never related, and matching them held publishing to a ceiling that
+ * the import pipeline had long outgrown.
+ *
+ * Override per environment: DAILY_TELEGRAM_PUBLISH_LIMIT.
+ */
+export const DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT = 50;
 
 /**
  * Quality gate. An account needs AT LEAST this many followers to be worth an AI

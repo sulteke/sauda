@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT } from "@/config/limits";
+
 const { findFirst, findUnique, update, count } = vi.hoisted(() => ({
   findFirst: vi.fn(),
   findUnique: vi.fn(),
@@ -16,6 +18,7 @@ import {
   processNextTelegramPost,
   publishWithOverride,
   type PublishableBoutique,
+  retryFailedPublication,
   toHashtag,
 } from "./telegram.service";
 
@@ -399,9 +402,11 @@ describe("daily Telegram publication limit", () => {
     });
   });
 
-  it("allows the 20th publication of the day", async () => {
+  it("allows the LAST publication of the day", async () => {
+    // Written against the constant, not the number: the ceiling is an editorial
+    // choice that moves, and this test is about the boundary, not its value.
     const fetchMock = stubTelegramOk();
-    stubPublishedToday(19);
+    stubPublishedToday(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT - 1);
     findFirst.mockResolvedValue(readyRow({ avatarUrl: "https://img/a.jpg" }));
 
     const result = await processNextTelegramPost();
@@ -411,22 +416,26 @@ describe("daily Telegram publication limit", () => {
     expect(result.dailyLimitReached).toBeUndefined();
   });
 
-  it("blocks the 21st publication and leaves the boutique PENDING for the next day", async () => {
+  it("blocks the one PAST the limit and leaves the boutique PENDING for the next day", async () => {
     const fetchMock = stubTelegramOk();
-    stubPublishedToday(20);
+    stubPublishedToday(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT);
     findFirst.mockResolvedValue(readyRow({ avatarUrl: "https://img/a.jpg" }));
 
     const result = await processNextTelegramPost();
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled(); // still APPROVED + PENDING
-    expect(result).toMatchObject({ processed: false, dailyLimitReached: true, publishedToday: 20 });
+    expect(result).toMatchObject({
+      processed: false,
+      dailyLimitReached: true,
+      publishedToday: DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT,
+    });
   });
 
   it("still resolves an ineligible boutique at the limit — a skip publishes nothing", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    stubPublishedToday(20);
+    stubPublishedToday(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT);
     findFirst.mockResolvedValue(readyRow({ city: "Астана" }));
 
     const result = await processNextTelegramPost();
@@ -486,14 +495,18 @@ describe("publishWithOverride — manual Unknown-location override", () => {
 
   it("cannot bypass the daily publication limit", async () => {
     const fetchMock = stubTelegramOk();
-    stubPublishedToday(20);
+    stubPublishedToday(DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT);
     findUnique.mockResolvedValue(readyRow({ city: null, avatarUrl: "https://img/a.jpg" }));
 
     const result = await publishWithOverride("b1");
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled(); // no override recorded either
-    expect(result).toMatchObject({ ok: false, rejection: "DAILY_LIMIT_REACHED", publishedToday: 20 });
+    expect(result).toMatchObject({
+      ok: false,
+      rejection: "DAILY_LIMIT_REACHED",
+      publishedToday: DEFAULT_DAILY_TELEGRAM_PUBLISH_LIMIT,
+    });
   });
 
   it("refuses a boutique whose city WAS detected — that is a detection fix, not an override", async () => {
@@ -540,5 +553,81 @@ describe("publishWithOverride — manual Unknown-location override", () => {
     expect(result.ok).toBe(false);
     expect(result.status).toBe("FAILED");
     expect(String(result.error)).toContain("chat not found");
+  });
+});
+
+describe("retryFailedPublication — a failed post is not final", () => {
+  beforeEach(() => {
+    findFirst.mockReset();
+    findUnique.mockReset();
+    update.mockReset();
+    count.mockReset();
+    count.mockResolvedValue(0);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * REGRESSION — nothing in the app moved a boutique out of FAILED, so an
+   * outage, a missing bot token or a transient Telegram error stranded it
+   * there permanently and the only way back was an UPDATE against the
+   * database by hand.
+   */
+  it("moves a FAILED boutique back to PENDING and clears the failure", async () => {
+    findUnique.mockResolvedValue(
+      readyRow({ telegramStatus: "FAILED", telegramError: "Telegram is not configured." }),
+    );
+    update.mockResolvedValue(readyRow({ telegramStatus: "PENDING" }));
+
+    const result = await retryFailedPublication("b1");
+
+    expect(result).toEqual({ ok: true, rejection: null });
+    expect(updateData(0).telegramStatus).toBe("PENDING");
+    expect(updateData(0).telegramError).toBeNull();
+  });
+
+  it("sends NOTHING — publishing stays with the queue, where the daily limit lives", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "FAILED" }));
+    update.mockResolvedValue(readyRow({ telegramStatus: "PENDING" }));
+
+    await retryFailedPublication("b1");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    // No publication happened, so nothing may claim one.
+    expect(updateData(0).telegramPublishedAt).toBeUndefined();
+  });
+
+  it("refuses a PUBLISHED boutique — subscribers must not get the same post twice", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "PUBLISHED" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_FAILED" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a SKIPPED boutique — that is a location decision publishWithOverride owns", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "SKIPPED" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_FAILED" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a boutique that is not approved", async () => {
+    findUnique.mockResolvedValue(readyRow({ status: "DRAFT", telegramStatus: "FAILED" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_APPROVED" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a missing boutique", async () => {
+    findUnique.mockResolvedValue(null);
+
+    expect(await retryFailedPublication("nope")).toEqual({ ok: false, rejection: "NOT_FOUND" });
+    expect(update).not.toHaveBeenCalled();
   });
 });
