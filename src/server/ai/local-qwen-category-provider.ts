@@ -90,8 +90,33 @@ const FEW_SHOT = [
 /** Local models have no shared load to wait out, so one attempt is the honest number. */
 const MAX_ATTEMPTS = 1;
 
+/**
+ * The one human-readable sentence out of a local server's error body.
+ *
+ * LM Studio answers `{"error":"..."}`; anything else is passed through as
+ * plain text. Bounded, because the body may echo part of the prompt.
+ */
+function explainBody(body: string): string {
+  const text = body.trim();
+  if (!text) return "";
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      const err = (parsed as { error?: unknown }).error;
+      if (typeof err === "string") return err.slice(0, 200);
+      if (err && typeof err === "object") {
+        const msg = (err as { message?: unknown }).message;
+        if (typeof msg === "string") return msg.slice(0, 200);
+      }
+    }
+  } catch {
+    /* not JSON — fall through to the raw text */
+  }
+  return text.slice(0, 200);
+}
+
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string | null } }[];
+  choices?: { message?: { content?: string | null }; finish_reason?: string | null }[];
 }
 
 export interface LocalQwenProviderOptions {
@@ -169,14 +194,47 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
           body: body.slice(0, 300),
           durationMs,
         });
+        // Carry the server's own sentence into the error. Without it the queue
+        // shows "400 Bad Request" and the actual cause — almost always "the
+        // prompt is longer than the context length" — stays buried in a log the
+        // person looking at the failed row is not reading.
         throw new AiCategoryProviderError(
-          `Local AI request failed (${response.status} ${response.statusText})`,
+          `Local AI request failed (${response.status} ${response.statusText})` +
+            (explainBody(body) ? `: ${explainBody(body)}` : ""),
           { provider: this.name, status: response.status },
         );
       }
 
       const payload = (await response.json()) as ChatCompletionResponse;
-      const content = payload.choices?.[0]?.message?.content ?? "";
+      const choice = payload.choices?.[0];
+      const content = choice?.message?.content ?? "";
+
+      /**
+       * A reply the model was cut off mid-sentence is not a reply.
+       *
+       * This has to be checked rather than parsed, because the failure is
+       * SILENT otherwise: `parseAiCategoryResult` answers unparseable text with
+       * an empty result, so a truncated JSON object becomes a shop analyzed
+       * "successfully" with no categories, no hashtags and no summary — written
+       * to the database and stamped as done. An 8B model that falls into
+       * repeating itself does exactly this, so the guard is not theoretical.
+       */
+      if (choice?.finish_reason === "length") {
+        logger.warn("local_ai.truncated", {
+          provider: this.name,
+          model: this.model,
+          label,
+          maxTokens: this.maxTokens,
+          replyChars: content.length,
+          durationMs,
+        });
+        throw new AiCategoryProviderError(
+          `Local AI reply was cut off at max_tokens (${this.maxTokens}). ` +
+            "Raise LOCAL_AI_MAX_TOKENS, or load the model with a larger context length.",
+          { provider: this.name },
+        );
+      }
+
       if (!content.trim()) {
         logger.warn("local_ai.empty_reply", {
           provider: this.name,

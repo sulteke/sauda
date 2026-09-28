@@ -87,6 +87,13 @@ export const DEFAULT_ANALYSIS_BATCH_SIZE = 3;
  * into a 60-profile one. Override: ANALYSIS_BATCH_SIZE.
  */
 export function analysisBatchSize(): number {
+  // A batch answers one shop per THIRD of a request, which is worth having only
+  // where requests are the scarce thing. On the local model they are not: it
+  // has no allowance to spend, and the scarce thing is context. Three real
+  // shops build a ~21k-character prompt — 20 posts of captions each — which
+  // overflows the window and fails all three at once with a 400. One shop at a
+  // time fits, and a shop that does fail, fails alone.
+  if (localAiOnly()) return 1;
   return positiveInt(process.env.ANALYSIS_BATCH_SIZE, DEFAULT_ANALYSIS_BATCH_SIZE);
 }
 
@@ -99,7 +106,17 @@ export function analysisBatchSize(): number {
 
 export const DEFAULT_LOCAL_AI_BASE_URL = "http://127.0.0.1:1234";
 export const DEFAULT_LOCAL_AI_MODEL = "qwen/qwen3-8b";
-export const DEFAULT_LOCAL_AI_MAX_TOKENS = 4096;
+/**
+ * Room reserved for the model's ANSWER.
+ *
+ * It is not free: the server reserves it out of the same context window the
+ * prompt has to fit in, so every token promised here is a token the profile
+ * cannot use. One shop's answer runs six categories and a sentence — well
+ * under a thousand tokens — and the local model analyzes exactly one shop at a
+ * time, so 2048 is already double what the job needs, and the headroom it
+ * gives back is what lets a real 20-post profile fit at all.
+ */
+export const DEFAULT_LOCAL_AI_MAX_TOKENS = 2048;
 /**
  * How long one local call may take.
  *

@@ -45,6 +45,16 @@ const reply = (content: string) =>
     text: async () => "",
   }) as unknown as Response;
 
+/** A reply the model was CUT OFF mid-sentence, as LM Studio reports it. */
+const truncated = (content: string) =>
+  ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    json: async () => ({ choices: [{ message: { content }, finish_reason: "length" }] }),
+    text: async () => "",
+  }) as unknown as Response;
+
 const httpError = (status: number, body = "server said no") =>
   ({
     ok: false,
@@ -236,6 +246,62 @@ describe("LocalQwenCategoryProvider — failures", () => {
 
     const init = fetchMock.mock.calls[0]![1] as { signal?: AbortSignal };
     expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  /**
+   * REGRESSION — an 8B model that falls into repeating itself runs to the token
+   * ceiling and the JSON is cut mid-object. The shared parser answers
+   * unparseable text with an EMPTY result, so before this guard such a shop was
+   * stored as analyzed successfully with no categories, no hashtags and no
+   * summary, and nothing anywhere said it had failed.
+   */
+  it("throws when the reply was cut off at max_tokens, instead of storing an empty analysis", async () => {
+    const cutOff = '{"categories":[{"id":"hudi","confidence":95,"reason":"Худи назван';
+    fetchMock.mockResolvedValue(truncated(cutOff));
+
+    const provider = new LocalQwenCategoryProvider();
+    await expect(provider.analyze(request())).rejects.toBeInstanceOf(AiCategoryProviderError);
+    await expect(provider.analyze(request())).rejects.toThrow(/cut off at max_tokens/i);
+  });
+
+  it("says how to fix a truncated reply, since the number is the whole problem", async () => {
+    process.env.LOCAL_AI_MAX_TOKENS = "2048";
+    fetchMock.mockResolvedValue(truncated("{"));
+
+    const provider = new LocalQwenCategoryProvider();
+    await expect(provider.analyze(request())).rejects.toThrow(/2048/);
+    await expect(provider.analyze(request())).rejects.toThrow(/context length/i);
+  });
+
+  it("accepts a reply that finished normally, so the guard is not over-eager", async () => {
+    fetchMock.mockResolvedValue(reply(SINGLE_JSON));
+
+    const provider = new LocalQwenCategoryProvider();
+    const result = await provider.analyze(request());
+    expect(result.categories.map((c) => c.id)).toEqual(["dzhinsy"]);
+  });
+
+  /**
+   * REGRESSION — the queue used to show a bare "400 Bad Request" for the single
+   * most common local failure (a prompt longer than the model's context), and
+   * the sentence that says so sat only in a server log.
+   */
+  it("carries the server's own explanation into the error, not just the status", async () => {
+    const body = JSON.stringify({
+      error:
+        "The number of tokens to keep from the initial prompt is greater than the context length",
+    });
+    fetchMock.mockResolvedValue(httpError(400, body));
+
+    const provider = new LocalQwenCategoryProvider();
+    await expect(provider.analyze(request())).rejects.toThrow(/greater than the context length/);
+  });
+
+  it("falls back to raw text when the error body is not JSON", async () => {
+    fetchMock.mockResolvedValue(httpError(500, "model crashed"));
+
+    const provider = new LocalQwenCategoryProvider();
+    await expect(provider.analyze(request())).rejects.toThrow(/model crashed/);
   });
 
   it("makes exactly ONE attempt — a local server has no shared load to wait out", async () => {
