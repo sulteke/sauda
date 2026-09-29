@@ -100,12 +100,21 @@ export const DEFAULT_ANALYSIS_BATCH_SIZE = 3;
  */
 export function analysisBatchSize(): number {
   // A batch answers one shop per THIRD of a request, which is worth having only
-  // where requests are the scarce thing. On the local model they are not: it
-  // has no allowance to spend, and the scarce thing is context. Three real
-  // shops build a ~21k-character prompt — 20 posts of captions each — which
-  // overflows the window and fails all three at once with a 400. One shop at a
-  // time fits, and a shop that does fail, fails alone.
-  if (localAiOnly()) return 1;
+  // where requests are the scarce thing. Wherever the local model is in the
+  // pool they are not: it has no allowance to spend, and the scarce thing is
+  // context. Three real shops build a ~21k-character prompt — 20 posts of
+  // captions each — which overflows the window and fails all three at once.
+  //
+  // The condition is localAiEnabled, NOT localAiOnly, and the difference is the
+  // whole point of routing by size. A batch shares one prompt, so it is routed
+  // as one: three shops together are over the size limit almost every time, so
+  // batching would send every shop to Gemini and the local model would never
+  // run at all — which is exactly what happened when this said localAiOnly.
+  // At one shop per request each is routed on its own size: the small ones go
+  // to the local model for free, and only the large ones spend Gemini.
+  //
+  // Production has no local entry, so it keeps batching three.
+  if (localAiEnabled()) return 1;
   return positiveInt(process.env.ANALYSIS_BATCH_SIZE, DEFAULT_ANALYSIS_BATCH_SIZE);
 }
 

@@ -81,11 +81,19 @@ describe("analysisBatchSize", () => {
     expect(analysisBatchSize()).toBe(1);
   });
 
-  it("keeps batching when the local model is merely ENABLED, not the whole pool", () => {
-    // Gemini still runs first here, and it is the one whose quota batching protects.
+  /**
+   * This asserted the opposite — that a pool with BOTH models kept batching,
+   * on the reasoning that Gemini runs first and batching protects its quota.
+   * Running it proved that wrong: a batch shares one prompt, so it is routed as
+   * one, and three shops together are over the size limit almost every time.
+   * Every shop went to Gemini, the local model never ran, and Gemini timed out
+   * and cooled down — with eight shops failing behind it.
+   */
+  it("drops to ONE whenever the local model is in the pool at all", () => {
     process.env.LOCAL_AI_ENABLED = "true";
-    expect(localAiOnly()).toBe(false);
-    expect(analysisBatchSize()).toBe(3);
+    expect(localAiOnly()).toBe(false); // not local-ONLY: Gemini is there too
+    // One shop per request is what lets each be routed on its own size.
+    expect(analysisBatchSize()).toBe(1);
   });
 });
 
