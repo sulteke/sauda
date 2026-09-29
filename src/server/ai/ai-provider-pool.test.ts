@@ -1136,6 +1136,67 @@ describe("local provider (development fallback)", () => {
   });
 
   /**
+   * REGRESSION — a small model that loops to the token ceiling, or answers in
+   * prose, threw an ordinary provider error and the pool parked it for ten
+   * minutes. One awkward profile then stopped every shop queued behind it,
+   * including the small ones it handles perfectly well.
+   */
+  describe("an unusable reply is the SHOP's fault, not the provider's", () => {
+    /** What the local provider throws when its reply was cut off mid-JSON. */
+    const truncatedLocally = () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(httpError(503)) // A
+        .mockResolvedValueOnce(httpError(503)) // A retry
+        .mockResolvedValueOnce(httpError(503)) // B
+        .mockResolvedValueOnce(httpError(503)) // B retry
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            choices: [
+              { message: { content: '{"categories":[{"id":"hudi"' }, finish_reason: "length" },
+            ],
+          }),
+          text: async () => "",
+        } as unknown as Response);
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    };
+
+    it("does NOT cool the local model down over one bad shop", async () => {
+      process.env.LOCAL_AI_ENABLED = "true";
+      truncatedLocally();
+
+      await expect(analyzeWithPool(request())).rejects.toThrow(/cut off at max_tokens/i);
+
+      // Gemini's two 503s are real provider failures and DO park those projects;
+      // the local model must not be among them.
+      const parked = cooldownUpsert.mock.calls.map(
+        (c) => (c[0] as { where: { provider: string } }).where.provider,
+      );
+      expect(parked).toContain(PRIMARY_PROVIDER_ID);
+      expect(parked).not.toContain(LOCAL_PROVIDER_ID);
+    });
+
+    it("keeps a genuine local failure cooling the provider down", async () => {
+      // A connection refused IS the provider being unwell, and still parks it.
+      process.env.LOCAL_AI_ENABLED = "true";
+      ledger.seed(PRIMARY_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      ledger.seed(FALLBACK_PROVIDER_ID, DEFAULT_GEMINI_MODEL, 20);
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("fetch failed")));
+
+      await expect(analyzeWithPool(request())).rejects.toThrow();
+
+      const parked = cooldownUpsert.mock.calls.map(
+        (c) => (c[0] as { where: { provider: string } }).where.provider,
+      );
+      expect(parked).toContain(LOCAL_PROVIDER_ID);
+    });
+  });
+
+  /**
    * REGRESSION — the pool used to cap every provider at one Gemini-shaped
    * constant (28s). An 8B model on a laptop answers a three-shop batch in
    * 60-90s, so every local call was aborted at 28s: the queue item became

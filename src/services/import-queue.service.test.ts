@@ -55,7 +55,35 @@ const { anyProviderAvailable, analyzeBatchWithPool } = vi.hoisted(() => ({
   anyProviderAvailable: vi.fn(),
   analyzeBatchWithPool: vi.fn(),
 }));
-vi.mock("@/server/ai/ai-provider-pool", () => ({ anyProviderAvailable, analyzeBatchWithPool }));
+/**
+ * A stand-in for the pool's own error, carrying the `usage` the service reads
+ * to decide between waiting out a cooldown and ending the run for the day.
+ * Declared inside vi.hoisted so the mock factory, which is hoisted above every
+ * import, can still reach it.
+ */
+const { NoProviderAvailableError } = vi.hoisted(() => {
+  class NoProviderAvailableError extends Error {
+    usage: {
+      id: string;
+      used: number;
+      limit: number;
+      available: boolean;
+      cooldownUntil: Date | null;
+    }[];
+    constructor(usage: NoProviderAvailableError["usage"]) {
+      super("No AI provider available right now");
+      this.name = "NoProviderAvailableError";
+      this.usage = usage;
+    }
+  }
+  return { NoProviderAvailableError };
+});
+
+vi.mock("@/server/ai/ai-provider-pool", () => ({
+  anyProviderAvailable,
+  analyzeBatchWithPool,
+  NoProviderAvailableError,
+}));
 
 // The Analyze stage now sends a BATCH: it prepares each job, makes one pooled
 // call, then applies each result. Those three are seams here; their own
@@ -1156,5 +1184,88 @@ describe("processNextImport — running the stages separately", () => {
     expect(analyzeBatchWithPool).toHaveBeenCalledTimes(1);
     expect(parseInstagramProfile).not.toHaveBeenCalled();
     expect(result.processed).toBe(true);
+  });
+});
+
+describe("analysis during a cooldown — wait, do not fail", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  /** One project parked but still inside its allowance — it comes back by itself. */
+  const coolingDown = () =>
+    new NoProviderAvailableError([
+      {
+        id: "primary",
+        used: 10,
+        limit: 20,
+        available: false,
+        cooldownUntil: new Date(Date.now() + 300_000),
+      },
+      {
+        id: "fallback",
+        used: 8,
+        limit: 20,
+        available: false,
+        cooldownUntil: new Date(Date.now() + 420_000),
+      },
+    ]);
+
+  /** The day is genuinely gone — no amount of waiting brings it back. */
+  const spentForToday = () =>
+    new NoProviderAvailableError([
+      { id: "primary", used: 20, limit: 20, available: false, cooldownUntil: null },
+      { id: "fallback", used: 20, limit: 20, available: false, cooldownUntil: null },
+    ]);
+
+  /**
+   * REGRESSION — Gate 3 asks whether the POOL has anything available, but the
+   * pool then routes the batch by size and may drop the very project the gate
+   * counted on. A large profile during a Gemini cooldown reached the call with
+   * the local model excluded and Gemini parked, and every row was marked
+   * ANALYSIS_FAILED for a wait that clears itself in minutes.
+   */
+  it("leaves rows PENDING_ANALYSIS and reports retryAfter when a project is merely cooling down", async () => {
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-1" }]);
+    analyzeBatchWithPool.mockRejectedValue(coolingDown());
+
+    const result = await processNextImport("analyze");
+
+    // Nothing was written off: no ANALYSIS_FAILED, no failure stamped on the job.
+    expect(update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "ANALYSIS_FAILED" }) }),
+    );
+    expect(markAnalysisJobFailed).not.toHaveBeenCalled();
+    // The loop is told when to come back.
+    expect(result.retryAfter).toBeTruthy();
+    expect(result.dailyLimitReached).toBeUndefined();
+  });
+
+  it("ends the run instead of waiting when the day is genuinely spent", async () => {
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-1" }]);
+    analyzeBatchWithPool.mockRejectedValue(spentForToday());
+
+    const result = await processNextImport("analyze");
+
+    expect(result.dailyLimitReached).toBe(true);
+    expect(result.retryAfter).toBeUndefined();
+    expect(markAnalysisJobFailed).not.toHaveBeenCalled();
+  });
+
+  it("still marks a REAL analysis failure as failed — waiting is only for cooldowns", async () => {
+    pendingAnalysis([{ id: "a1", instagramUrl: "https://instagram.com/a1", importJobId: "job-1" }]);
+    analyzeBatchWithPool.mockRejectedValue(new Error("Gemini request failed (500)"));
+
+    await processNextImport("analyze");
+
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "a1" },
+      data: { status: "ANALYSIS_FAILED", error: "Gemini request failed (500)" },
+    });
+    expect(markAnalysisJobFailed).toHaveBeenCalled();
   });
 });

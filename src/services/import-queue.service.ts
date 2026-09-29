@@ -7,7 +7,11 @@ import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { countAnalysesToday } from "@/server/ai/analysis-budget";
 import { AiCategoryProviderError } from "@/lib/ai-category-provider";
-import { analyzeBatchWithPool, anyProviderAvailable } from "@/server/ai/ai-provider-pool";
+import {
+  analyzeBatchWithPool,
+  anyProviderAvailable,
+  NoProviderAvailableError,
+} from "@/server/ai/ai-provider-pool";
 import {
   applyAnalysisResult,
   markAnalysisJobFailed,
@@ -715,6 +719,46 @@ async function runAnalyzeBatchStage(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Analysis failed";
+
+    /**
+     * Nothing could run, and it is only a cooldown: WAIT rather than fail.
+     *
+     * Gate 3 above already asks whether any project can run, but it asks about
+     * the pool as a whole, while the pool then routes THIS batch by size and
+     * may drop the only project the gate was counting on. A large profile
+     * during a Gemini cooldown reaches here with the local model excluded and
+     * Gemini parked — a state that clears itself in minutes.
+     *
+     * Marking those ANALYSIS_FAILED spends a retry the operator has to undo by
+     * hand, for a wait the queue was already willing to sit out in the parse
+     * stage. So the rows stay in PENDING_ANALYSIS and the browser loop parks on
+     * `retryAfter`, exactly as it does for the gate. A genuinely spent day says
+     * so instead, and ends the run.
+     */
+    if (error instanceof NoProviderAvailableError) {
+      const soonest = error.usage
+        .filter((u) => !u.available && u.used < u.limit && u.cooldownUntil !== null)
+        .map((u) => u.cooldownUntil!.getTime());
+      const remaining = await countRemaining();
+      logger.info(soonest.length > 0 ? "queue.cooling_down" : "queue.daily_limit_reached", {
+        stage: "analyze",
+        handles: prepared.map((j) => j.handle),
+        error: message,
+        remaining,
+      });
+      // Untouched: still PENDING_ANALYSIS, nothing stamped, nothing to undo.
+      return {
+        processed: done.length > 0,
+        item: done[0] ?? null,
+        items: done,
+        remaining,
+        ...(soonest.length > 0
+          ? { retryAfter: new Date(Math.min(...soonest)).toISOString() }
+          : { dailyLimitReached: true }),
+        analyzedToday: await countAnalysesToday(),
+      };
+    }
+
     // The whole batch failed, so no shop in it was analyzed: every row goes
     // back as retryable, and none of them carries an analyzedAt.
     for (const job of prepared) {

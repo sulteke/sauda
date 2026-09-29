@@ -65,7 +65,7 @@ const NO_THINK = "/no_think";
  */
 const FEW_SHOT = [
   "WORKED EXAMPLES — study these, then answer for the real data below in the same style.",
-  "Each example shows the object for ONE shop. When several shops are requested, this same object goes under that shop's handle inside \"results\".",
+  'Each example shows the object for ONE shop. When several shops are requested, this same object goes under that shop\'s handle inside "results".',
   "",
   'Example A — bio: "Женская одежда. Худи и футболки. Иногда бывают джинсы."',
   '{"categories":[{"id":"hudi","confidence":95,"reason":"Худи названы прямо в описании."},{"id":"futbolki","confidence":95,"reason":"Футболки названы прямо в описании."},{"id":"dzhinsy","confidence":70,"reason":"Джинсы упомянуты как нерегулярный товар."}],"hashtags":["#Женскаяодежда","#Худи","#Футболки"],"city":null,"mall":null,"address":null,"targetAudience":"Женщины","priceSegment":null,"style":null,"summary":"Магазин женской одежды: худи, футболки, иногда джинсы."}',
@@ -83,7 +83,7 @@ const FEW_SHOT = [
   "",
   "What these examples demonstrate:",
   "- Confidence is a JUDGEMENT, not a formality: something stated outright is 90-100, something mentioned once or in passing is 65-85. Do not mark everything 100.",
-  '- The audience tag follows what the profile SAYS: #Женскаяодежда, #Мужскаяодежда or #Унисексодежда when stated, and NO audience tag at all when it is not.',
+  "- The audience tag follows what the profile SAYS: #Женскаяодежда, #Мужскаяодежда or #Унисексодежда when stated, and NO audience tag at all when it is not.",
   '- "summary", "targetAudience", "priceSegment", "style" and every "reason" are written in RUSSIAN, whatever language the profile is in.',
 ].join("\n");
 
@@ -284,7 +284,9 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
         throw new AiCategoryProviderError(
           `Local AI reply was cut off at max_tokens (${this.maxTokens}). ` +
             "Raise LOCAL_AI_MAX_TOKENS, or load the model with a larger context length.",
-          { provider: this.name },
+          // This shop defeated the model; the model is fine. Parking it for ten
+          // minutes would stop every shop queued behind one awkward profile.
+          { provider: this.name, itemFault: true },
         );
       }
 
@@ -355,8 +357,7 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
      * nothing at all means the reply was never usable, and the item should stay
      * retryable instead of being quietly written off.
      */
-    const empty =
-      result.categories.length === 0 && result.hashtags.length === 0 && !result.summary;
+    const empty = result.categories.length === 0 && result.hashtags.length === 0 && !result.summary;
     if (empty && text.trim()) {
       logger.warn("local_ai.unparsed_reply", {
         provider: this.name,
@@ -367,7 +368,7 @@ export class LocalQwenCategoryProvider implements AiCategoryProvider {
       });
       throw new AiCategoryProviderError(
         "Local AI returned a reply that carried no usable analysis — it did not answer in JSON.",
-        { provider: this.name },
+        { provider: this.name, itemFault: true },
       );
     }
 

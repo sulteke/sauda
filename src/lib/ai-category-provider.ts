@@ -133,16 +133,34 @@ export class AiCategoryProviderError extends Error {
    * not a rate limit.
    */
   readonly quotaScope?: QuotaScope;
+  /**
+   * This SHOP defeated the model, rather than the provider being unwell.
+   *
+   * A small model that falls into repeating itself runs to the token ceiling,
+   * or answers in prose instead of JSON — on one profile, while every other
+   * shop it is handed goes through fine. Treating that as a provider failure
+   * parks the model for ten minutes over a single awkward profile and stops
+   * the shops queued behind it, which is the opposite of what the cooldown is
+   * for. Another provider may still succeed, so the call still fails over.
+   */
+  readonly itemFault?: boolean;
 
   constructor(
     message: string,
-    options: { provider: string; status?: number; cause?: unknown; quotaScope?: QuotaScope },
+    options: {
+      provider: string;
+      status?: number;
+      cause?: unknown;
+      quotaScope?: QuotaScope;
+      itemFault?: boolean;
+    },
   ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "AiCategoryProviderError";
     this.provider = options.provider;
     this.status = options.status;
     this.quotaScope = options.quotaScope;
+    this.itemFault = options.itemFault;
   }
 }
 
@@ -197,11 +215,13 @@ export function buildAiCategoryPrompt(request: AiCategoryRequest): string {
   const wantsHashtags = allowedHashtags.length > 0;
   const max = MAX_TELEGRAM_HASHTAGS;
   const hashtagSchema = wantsHashtags ? ',"hashtags":["#Tag","..."]' : "";
-  const hashtagRules = wantsHashtags
-    ? hashtagRuleLines(max)
-    : [];
+  const hashtagRules = wantsHashtags ? hashtagRuleLines(max) : [];
   const hashtagSection = wantsHashtags
-    ? ["Allowed hashtags (copy exactly; these are the ONLY permitted values):", formatHashtagWhitelist(allowedHashtags), ""]
+    ? [
+        "Allowed hashtags (copy exactly; these are the ONLY permitted values):",
+        formatHashtagWhitelist(allowedHashtags),
+        "",
+      ]
     : [];
 
   return [
@@ -254,13 +274,13 @@ function categoryRuleLines(): string[] {
 /** The hashtag rules, in one place — see {@link categoryRuleLines}. */
 function hashtagRuleLines(max: number): string[] {
   return [
-        'Also select Telegram "hashtags" for this boutique. This is a SEPARATE field from "categories" — it describes how the boutique is advertised, not its internal classification.',
-        "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
-        `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
-        "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
-        "COMBINE ONE audience tag with ONE OR TWO garment tags — that is normally the whole set: womenswear jeans is #Женскаяодежда #Джинсы, menswear T-shirts is #Мужскаяодежда #Футболки, unisex hoodies is #Унисексодежда #Худи, women\'s sportswear is #Женскаяодежда #Спортивнаяодежда, and a winter men\'s jacket shop is #Мужскаяодежда #Куртки #Зимняяодежда. Two or three tags is the norm; reach for more only when the shop genuinely sells across several ranges.",
-        "NEVER repeat the same idea at two levels of detail. The audience tag already says who it is for, so do not follow it with a garment tag that repeats the audience, and do not pick a narrower tag when a broader one you already chose covers it.",
-        "Use an audience, seasonal or unisex tag ONLY when the profile actually says so. A coat in a photo is not evidence of #Зимняяодежда, and gender simply not being mentioned is not #Унисексодежда — use the plain garment tag alone whenever the profile does not state it.",
+    'Also select Telegram "hashtags" for this boutique. This is a SEPARATE field from "categories" — it describes how the boutique is advertised, not its internal classification.',
+    "Choose hashtags ONLY from the allowed hashtag list below, copied CHARACTER FOR CHARACTER (including the leading # and the exact letter case). NEVER invent, translate, pluralize, or combine hashtags.",
+    `Return 2 to ${max} hashtags, and never more than ${max}. Pick only hashtags genuinely supported by the profile and posts — do NOT pad the list to reach ${max}, and do NOT add every hashtag that could conceivably apply.`,
+    "When a broad allowed hashtag already covers the idea, reuse it rather than inventing a narrower one (e.g. #Обувь for a shoe shop, adding #Кроссовки only when sneakers are specifically its focus).",
+    "COMBINE ONE audience tag with ONE OR TWO garment tags — that is normally the whole set: womenswear jeans is #Женскаяодежда #Джинсы, menswear T-shirts is #Мужскаяодежда #Футболки, unisex hoodies is #Унисексодежда #Худи, women\'s sportswear is #Женскаяодежда #Спортивнаяодежда, and a winter men\'s jacket shop is #Мужскаяодежда #Куртки #Зимняяодежда. Two or three tags is the norm; reach for more only when the shop genuinely sells across several ranges.",
+    "NEVER repeat the same idea at two levels of detail. The audience tag already says who it is for, so do not follow it with a garment tag that repeats the audience, and do not pick a narrower tag when a broader one you already chose covers it.",
+    "Use an audience, seasonal or unisex tag ONLY when the profile actually says so. A coat in a photo is not evidence of #Зимняяодежда, and gender simply not being mentioned is not #Унисексодежда — use the plain garment tag alone whenever the profile does not state it.",
     'Return an empty "hashtags" array when the content supports none of them.',
   ];
 }
@@ -533,7 +553,8 @@ export function parseAiBatchResult(raw: unknown, expected: readonly string[]): A
     const e = entry as Record<string, unknown>;
     const handle = typeof e.handle === "string" ? e.handle : "";
     const real = canonical.get(key(handle));
-    if (!real) throw new AiBatchValidationError(`unknown handle in skipped: ${handle || "(missing)"}`);
+    if (!real)
+      throw new AiBatchValidationError(`unknown handle in skipped: ${handle || "(missing)"}`);
     const already = seen.get(key(handle));
     if (already === "result") {
       throw new AiBatchValidationError(`${real} appears in BOTH results and skipped`);
@@ -542,7 +563,8 @@ export function parseAiBatchResult(raw: unknown, expected: readonly string[]): A
       throw new AiBatchValidationError(`handle appears more than once in skipped: ${real}`);
     }
     seen.set(key(handle), "skipped");
-    const reason = typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : "no reason given";
+    const reason =
+      typeof e.reason === "string" && e.reason.trim() ? e.reason.trim() : "no reason given";
     skipped.push({ handle: real, reason });
   }
 

@@ -565,8 +565,21 @@ async function withProviderFailover<T>(
       }
 
       const quotaScope = error instanceof AiCategoryProviderError ? error.quotaScope : undefined;
+      const itemFault = error instanceof AiCategoryProviderError && error.itemFault === true;
 
-      if (quotaScope === "per-day") {
+      if (itemFault) {
+        // This SHOP defeated the model — it looped to the token ceiling, or
+        // answered in prose. The provider itself is healthy and the next shop
+        // will very likely go through, so it keeps its place in the pool. The
+        // call still falls through to the next provider, which may have the
+        // context this one lacked.
+        logger.warn("ai.pool.item_fault", {
+          ...context,
+          provider: entry.id,
+          error: message,
+          reason: "The reply was unusable for this shop; the provider is not cooled down.",
+        });
+      } else if (quotaScope === "per-day") {
         // The project's own count is authoritative and is ahead of ours. Spend
         // the rest of its ledger so no further request is sent today, and skip
         // the cooldown — a ten-minute wait cannot bring back a spent day.
