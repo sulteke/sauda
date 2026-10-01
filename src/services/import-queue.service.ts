@@ -318,7 +318,12 @@ export async function processNextImport(stage?: QueueStage): Promise<ProcessResu
       : await prisma.importQueue.findMany({
           where: { status: "PENDING_ANALYSIS" },
           orderBy: { createdAt: "asc" },
-          take: batchSize,
+          // A window, not just the next batch. Shops are routed by size, so the
+          // oldest one may need a project that is cooling down while a newer,
+          // smaller one could run right now on a model sitting idle. Reading a
+          // few extra ids costs nothing and is what lets the queue step over a
+          // shop it cannot serve yet.
+          take: batchSize + ANALYZE_LOOKAHEAD,
           select: { id: true, instagramUrl: true, importJobId: true },
         });
   if (analyzeRows.length > 0) {
@@ -327,7 +332,9 @@ export async function processNextImport(stage?: QueueStage): Promise<ProcessResu
     // through to parse when nothing is PENDING_PARSE would report "queue done"
     // and strand the items we are holding, so the two must agree.
     const unparsed = await prisma.importQueue.count({ where: { status: "PENDING_PARSE" } });
-    if (stage === "analyze" || full || unparsed === 0) return runAnalyzeBatchStage(analyzeRows);
+    if (stage === "analyze" || full || unparsed === 0) {
+      return runAnalyzeSkippingBlocked(analyzeRows, batchSize);
+    }
     // Otherwise fall through and parse the next profile, letting the batch fill.
   }
 
@@ -520,6 +527,54 @@ function parsedFollowerCount(rawProfile: unknown): number | null | undefined {
  * The batch is all-or-nothing on FAILURE but not on OUTCOME: a shop the model
  * declines to classify is skipped individually and the rest still land.
  */
+/** How far past the next batch the queue may look for a shop it can serve. */
+const ANALYZE_LOOKAHEAD = 8;
+/** Batches tried in one call before giving up and reporting the wait. */
+const ANALYZE_MAX_SLICES = 3;
+
+/**
+ * Analyzes the next batch, stepping over shops no project can take yet.
+ *
+ * Routing by size means the queue's own order is not the order of what is
+ * servable: the oldest shop may be a large one that only a cooling-down Gemini
+ * can handle, while eight smaller ones behind it would go through immediately
+ * on a local model that is sitting idle. Taking strictly the oldest let one
+ * undeliverable shop hold up the entire queue — measured, with eight shops
+ * waiting on one.
+ *
+ * So a batch that cannot run yet is left untouched in PENDING_ANALYSIS and the
+ * next slice is tried instead. Skipping stops as soon as nothing at all is
+ * available, because then every shop lands on the same closed door, and after
+ * a few slices, so one call cannot wander through the whole queue.
+ */
+async function runAnalyzeSkippingBlocked(
+  window: { id: string; instagramUrl: string; importJobId: string | null }[],
+  batchSize: number,
+): Promise<ProcessResult> {
+  let parked: ProcessResult | null = null;
+
+  for (let i = 0, slices = 0; i < window.length && slices < ANALYZE_MAX_SLICES; i += batchSize) {
+    slices += 1;
+    const result = await runAnalyzeBatchStage(window.slice(i, i + batchSize));
+
+    // Progress, a spent day, or an outright failure: all final for this call.
+    if (result.processed || result.dailyLimitReached || !result.retryAfter) return result;
+
+    parked = result;
+    // Worth trying a different shop only while SOMETHING can still run.
+    const { available } = await anyProviderAvailable();
+    if (!available) return result;
+
+    logger.info("queue.analyze_skipped_blocked", {
+      skipped: window.slice(i, i + batchSize).map((r) => r.id),
+      retryAfter: result.retryAfter,
+      reason: "No project can take this shop yet; trying a shop that one can.",
+    });
+  }
+
+  return parked ?? { processed: false, item: null, remaining: await countRemaining() };
+}
+
 async function runAnalyzeBatchStage(
   rows: { id: string; instagramUrl: string; importJobId: string | null }[],
 ): Promise<ProcessResult> {

@@ -1269,3 +1269,87 @@ describe("analysis during a cooldown — wait, do not fail", () => {
     expect(markAnalysisJobFailed).toHaveBeenCalled();
   });
 });
+
+describe("analysis steps over shops no project can take yet", () => {
+  beforeEach(() => {
+    resetAll();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const cooling = () =>
+    new NoProviderAvailableError([
+      {
+        id: "primary",
+        used: 2,
+        limit: 20,
+        available: false,
+        cooldownUntil: new Date(Date.now() + 300_000),
+      },
+    ]);
+
+  /**
+   * REGRESSION — routing by size means queue order is not the order of what is
+   * servable. The oldest shop was a large one waiting on a cooling-down Gemini,
+   * and eight smaller shops behind it sat idle while a healthy local model had
+   * nothing to do.
+   */
+  it("tries the next shop when the oldest one cannot run yet", async () => {
+    process.env.ANALYSIS_BATCH_SIZE = "1";
+    pendingAnalysis([
+      { id: "big", instagramUrl: "https://instagram.com/big", importJobId: "job-big" },
+      { id: "small", instagramUrl: "https://instagram.com/small", importJobId: "job-small" },
+    ]);
+    // Something is still available, so skipping is worth doing.
+    anyProviderAvailable.mockResolvedValue({ available: true, usage: [] });
+    // The first shop has nowhere to go; the second goes through.
+    analyzeBatchWithPool
+      .mockRejectedValueOnce(cooling())
+      .mockImplementationOnce((items: { handle: string }[]) => ({
+        batch: { results: new Map(items.map((i) => [i.handle, {}])), skipped: [] },
+        providerId: "local",
+      }));
+
+    const result = await processNextImport("analyze");
+
+    expect(analyzeBatchWithPool).toHaveBeenCalledTimes(2);
+    expect(result.processed).toBe(true);
+    // The blocked shop was left alone, not written off.
+    expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ where: { id: "big" } }));
+    delete process.env.ANALYSIS_BATCH_SIZE;
+  });
+
+  it("stops skipping when NOTHING is available — every shop meets the same closed door", async () => {
+    process.env.ANALYSIS_BATCH_SIZE = "1";
+    pendingAnalysis([
+      { id: "a", instagramUrl: "https://instagram.com/a", importJobId: "job-a" },
+      { id: "b", instagramUrl: "https://instagram.com/b", importJobId: "job-b" },
+      { id: "c", instagramUrl: "https://instagram.com/c", importJobId: "job-c" },
+    ]);
+    // Nothing available, but the projects are only cooling down — so the gate
+    // reports WHEN to come back rather than ending the day.
+    anyProviderAvailable.mockResolvedValue({
+      available: false,
+      usage: [
+        {
+          id: "primary",
+          used: 2,
+          limit: 20,
+          available: false,
+          cooldownUntil: new Date(Date.now() + 300_000),
+        },
+      ],
+    });
+    analyzeBatchWithPool.mockRejectedValue(cooling());
+
+    const result = await processNextImport("analyze");
+
+    // The gate before the call already sees nothing is available, so no shop is
+    // even attempted — and the queue is not walked looking for one that is.
+    expect(analyzeBatchWithPool).not.toHaveBeenCalled();
+    expect(result.retryAfter).toBeTruthy();
+    delete process.env.ANALYSIS_BATCH_SIZE;
+  });
+});
