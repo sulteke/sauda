@@ -1,11 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, Send, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import {
+  describeTally,
+  EMPTY_TALLY,
+  MAX_CONSECUTIVE_FAILURES,
+  type PublishRunTally,
+  shouldStopForFailures,
+  tallyResult,
+} from "@/features/telegram/publish-run";
 
 /**
  * Pause between publications.
@@ -43,22 +51,32 @@ async function publishNext(): Promise<ProcessResult> {
 export function PublishQueueButton({ pending }: { pending: number }) {
   const router = useRouter();
   const [running, setRunning] = useState(false);
-  const [done, setDone] = useState(0);
+  const [tally, setTally] = useState<PublishRunTally>(EMPTY_TALLY);
+  /**
+   * Set by the Stop button and read between posts. A run used to have no way
+   * to be stopped short of leaving the page.
+   */
+  const stopRef = useRef(false);
 
   async function publishAll() {
     setRunning(true);
-    setDone(0);
-    let count = 0;
+    setTally(EMPTY_TALLY);
+    stopRef.current = false;
 
+    let current = EMPTY_TALLY;
     let limitReached = false;
+    let stoppedForFailures = false;
+    let stoppedByUser = false;
+    let lastError: string | null = null;
 
     try {
       let keepGoing = true;
       while (keepGoing) {
         const result = await publishNext();
         if (result.processed) {
-          count += 1;
-          setDone(count);
+          current = tallyResult(current, result.status);
+          setTally(current);
+          if (result.status === "FAILED") lastError = result.error;
         }
         // Allowance spent: the server left the boutique PENDING, so another call
         // would re-select it. Stop here; the rest publishes on the next day.
@@ -66,19 +84,39 @@ export function PublishQueueButton({ pending }: { pending: number }) {
           limitReached = true;
           break;
         }
+        // Failures do not count toward the daily limit, so nothing else stops a
+        // run in which every post fails. Give up before it walks the queue.
+        if (shouldStopForFailures(current)) {
+          stoppedForFailures = true;
+          break;
+        }
+        if (stopRef.current) {
+          stoppedByUser = true;
+          break;
+        }
         keepGoing = result.processed && result.remaining > 0;
         // Only BETWEEN publications — never after the last one, where it would
         // just be dead time before the button re-enables.
         if (keepGoing) await sleep(PUBLISH_DELAY_MS);
       }
-      if (limitReached) {
-        toast.message("Daily publication limit reached", {
-          description: `Processed ${count} this run. The remaining approved boutiques stay queued for tomorrow.`,
+
+      const detail = describeTally(current);
+      if (stoppedForFailures) {
+        toast.error(`Stopped after ${MAX_CONSECUTIVE_FAILURES} failures in a row`, {
+          description: `${detail}. The rest are still queued. Last error: ${lastError ?? "unknown"}`,
         });
+      } else if (limitReached) {
+        toast.message("Daily publication limit reached", {
+          description: `${detail}. The remaining approved boutiques stay queued for tomorrow.`,
+        });
+      } else if (stoppedByUser) {
+        toast.message("Stopped", { description: `${detail}. The rest are still queued.` });
+      } else if (current.published + current.failed + current.skipped === 0) {
+        toast.success("Nothing to publish");
+      } else if (current.failed > 0) {
+        toast.error("Finished with failures", { description: detail });
       } else {
-        toast.success(
-          count > 0 ? `Published ${count} boutique${count === 1 ? "" : "s"}` : "Nothing to publish",
-        );
+        toast.success(`Published ${current.published}`, { description: detail });
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Publishing failed");
@@ -88,19 +126,31 @@ export function PublishQueueButton({ pending }: { pending: number }) {
     }
   }
 
+  const settled = tally.published + tally.failed + tally.skipped;
+
   return (
-    <Button onClick={publishAll} disabled={running || pending === 0}>
-      {running ? (
-        <>
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Publishing{done > 0 ? ` (${done})` : ""}...
-        </>
-      ) : (
-        <>
-          <Send className="h-4 w-4" />
-          Publish Queue
-        </>
+    <div className="flex items-center gap-2">
+      <Button onClick={publishAll} disabled={running || pending === 0}>
+        {running ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Publishing{settled > 0 ? ` (${tally.published} sent` : ""}
+            {settled > 0 && tally.failed > 0 ? `, ${tally.failed} failed` : ""}
+            {settled > 0 ? ")" : ""}...
+          </>
+        ) : (
+          <>
+            <Send className="h-4 w-4" />
+            Publish Queue
+          </>
+        )}
+      </Button>
+      {running && (
+        <Button variant="outline" onClick={() => (stopRef.current = true)}>
+          <Square className="h-4 w-4" />
+          Stop
+        </Button>
       )}
-    </Button>
+    </div>
   );
 }
