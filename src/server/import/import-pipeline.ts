@@ -2,10 +2,7 @@ import "server-only";
 
 import { type Boutique, Prisma, type ImportJob } from "@prisma/client";
 
-import {
-  type AiCategoryResult,
-  disabledAiCategoryProvider,
-} from "@/lib/ai-category-provider";
+import { type AiCategoryResult, disabledAiCategoryProvider } from "@/lib/ai-category-provider";
 import { enrichBoutique } from "@/lib/boutique-enrichment";
 import {
   type CategoryDetectionInput,
@@ -18,7 +15,7 @@ import {
   runHybridDetection,
 } from "@/lib/category-pipeline";
 import { completeHashtags } from "@/lib/hashtag-derivation";
-import { resolveLocation } from "@/lib/location";
+import { cityFromGisUrl, resolveLocation } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { recordSuccessfulAnalysis } from "@/server/ai/analysis-budget";
@@ -111,9 +108,7 @@ export function mapProfileToPreview(
 }
 
 /** Coerces an optional value into a Prisma Json input, mapping absent → SQL NULL. */
-function jsonOrDbNull(
-  value: unknown,
-): Prisma.InputJsonValue | typeof Prisma.DbNull {
+function jsonOrDbNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.DbNull {
   return value == null ? Prisma.DbNull : (value as Prisma.InputJsonValue);
 }
 
@@ -282,16 +277,16 @@ async function upsertBoutiqueFromPreview(
     hashtags: preview.hashtags ?? [],
   };
 
-  // Location is derived from data we already have (enrichment city, AI city). It
-  // is set on CREATE only; on UPDATE, city/region/country are left untouched so a
-  // re-import never overwrites a manually-corrected location. Location NEVER
-  // filters a boutique out — it only later gates Telegram publication.
+  // Location is derived from data we already have — the bio, the 2GIS venue the
+  // store was discovered in, and the AI. Location NEVER filters a boutique out;
+  // it only later gates Telegram publication.
   const location = resolveLocation({
     enrichmentCity: preview.enrichment?.city ?? null,
+    gisCity: await gisCityFor(preview.instagramHandle),
     aiCity: preview.aiResult?.city ?? null,
   });
 
-  return prisma.boutique.upsert({
+  const boutique = await prisma.boutique.upsert({
     where: { instagramHandle: preview.instagramHandle },
     update: { ...profileData, ...(keepExistingAi ? {} : categoryData), updatedAt: new Date() },
     create: {
@@ -309,6 +304,62 @@ async function upsertBoutiqueFromPreview(
       ...profileData,
     },
   });
+
+  /**
+   * Fill a BLANK location; never replace one.
+   *
+   * The boutique is created at Parse, before any AI has run, so the location set
+   * on create can only use the bio and the 2GIS venue. The AI's city arrives at
+   * Analyze, which reaches this function as an UPDATE — and the update branch
+   * deliberately leaves location alone, so a manual correction is never
+   * overwritten. The combined effect was that an AI-detected city was never
+   * written to any boutique at all: forty of them carried "Алматы" in their
+   * analysis and an empty city column, and the Telegram publisher skipped them
+   * as location-unknown.
+   *
+   * Conditioning on `city: null` keeps both promises. A detected city fills an
+   * empty column; a city that is already there — detected earlier or corrected
+   * by hand — is left exactly as it is.
+   */
+  if (location.city && !boutique.city) {
+    const filled = await prisma.boutique.updateMany({
+      where: { id: boutique.id, city: null },
+      data: { city: location.city, region: location.region, country: location.country },
+    });
+    if (filled.count > 0) {
+      logger.info("import.location_filled", {
+        handle: preview.instagramHandle,
+        city: location.city,
+      });
+      return { ...boutique, ...location };
+    }
+  }
+
+  return boutique;
+}
+
+/**
+ * The city of the 2GIS venue this handle was discovered in, if it was.
+ *
+ * A store found through 2GIS has a known physical address — far stronger
+ * evidence of its city than anything in its Instagram bio — but that
+ * knowledge stayed on the discovery candidate and never reached the boutique,
+ * so all seventy-nine 2GIS boutiques had an empty city and every one of them
+ * had to be confirmed by hand before it could be published.
+ */
+async function gisCityFor(handle: string): Promise<string | null> {
+  const candidates = await prisma.discoveryCandidate.findMany({
+    where: { handle: { equals: handle, mode: "insensitive" }, source: "2gis" },
+    select: { sourceMeta: true },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+  });
+  for (const candidate of candidates) {
+    const meta = candidate.sourceMeta as { gisUrl?: string | null } | null;
+    const city = cityFromGisUrl(meta?.gisUrl);
+    if (city) return city;
+  }
+  return null;
 }
 
 /**

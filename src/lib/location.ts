@@ -38,7 +38,10 @@ export const KZ_CITIES: { display: string; variants: string[] }[] = [
     ],
   },
   { display: SHYMKENT, variants: ["шымкент", "шымкенте", "shymkent", "чимкент"] },
-  { display: "Караганда", variants: ["караганда", "караганде", "караганды", "karaganda", "қарағанды"] },
+  {
+    display: "Караганда",
+    variants: ["караганда", "караганде", "караганды", "karaganda", "қарағанды"],
+  },
   { display: "Актобе", variants: ["актобе", "aktobe", "ақтөбе"] },
   { display: "Тараз", variants: ["тараз", "таразе", "taraz"] },
   { display: "Павлодар", variants: ["павлодар", "павлодаре", "pavlodar"] },
@@ -46,7 +49,10 @@ export const KZ_CITIES: { display: string; variants: string[] }[] = [
   { display: "Семей", variants: ["семей", "семее", "semey", "семипалатинск"] },
   { display: "Атырау", variants: ["атырау", "atyrau"] },
   { display: "Костанай", variants: ["костанай", "костанае", "kostanay", "қостанай"] },
-  { display: "Кызылорда", variants: ["кызылорда", "кызылорде", "кызылорды", "kyzylorda", "қызылорда"] },
+  {
+    display: "Кызылорда",
+    variants: ["кызылорда", "кызылорде", "кызылорды", "kyzylorda", "қызылорда"],
+  },
   { display: "Уральск", variants: ["уральск", "уральске", "uralsk"] },
   { display: "Петропавловск", variants: ["петропавловск", "петропавловске", "petropavlovsk"] },
   { display: "Актау", variants: ["актау", "aktau"] },
@@ -99,19 +105,48 @@ export interface ResolvedLocation {
 }
 
 /**
- * Resolves the location to persist from the signals we already have: the
- * enrichment-detected city (deterministic, already canonical) is preferred, with
- * the AI-provided city as a fallback. A recognized KZ city is canonicalized and
- * tagged with the country; an unrecognized city string is kept verbatim (so it
- * still shows on the website / under the "Other" filter) with an unknown country.
- * Region has no reliable source yet and stays null (optional, future-proofed).
+ * The city a 2GIS place link belongs to, read from the link itself.
+ *
+ * 2GIS puts the city in the first path segment — `2gis.kz/almaty/firm/…`,
+ * `2gis.kz/astana/inside/…` — so a store discovered there carries its city in
+ * the very URL we already store, with no extra lookup. Returns the canonical
+ * Kazakhstan display name, or null for any link that is not a recognizable
+ * 2GIS city URL.
+ */
+export function cityFromGisUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)2gis\./i.test(parsed.hostname)) return null;
+  const slug = parsed.pathname.split("/").filter(Boolean)[0];
+  return canonicalKzCity(slug);
+}
+
+/**
+ * Resolves the location to persist from the signals we already have, most
+ * trustworthy first:
+ *
+ *  1. the enrichment-detected city — deterministic, read from the shop's own bio;
+ *  2. the 2GIS city — where the store we discovered physically IS, which is
+ *     ground truth rather than an inference;
+ *  3. the AI-provided city — a model's reading of the profile, the weakest.
+ *
+ * A recognized KZ city is canonicalized and tagged with the country; an
+ * unrecognized city string is kept verbatim (so it still shows on the website /
+ * under the "Other" filter) with an unknown country. Region has no reliable
+ * source yet and stays null (optional, future-proofed).
  */
 export function resolveLocation(input: {
   enrichmentCity?: string | null;
+  gisCity?: string | null;
   aiCity?: string | null;
   region?: string | null;
 }): ResolvedLocation {
-  const raw = input.enrichmentCity?.trim() || input.aiCity?.trim() || null;
+  const raw = input.enrichmentCity?.trim() || input.gisCity?.trim() || input.aiCity?.trim() || null;
   if (!raw) return { city: null, region: input.region ?? null, country: null };
 
   const canonical = canonicalKzCity(raw);
