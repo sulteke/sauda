@@ -24,6 +24,7 @@ import type { BoutiqueEnrichment, BoutiquePreview, ImportJobDTO } from "@/types"
 import { slugify } from "@/utils/format";
 
 import { ImportStateError } from "./errors";
+import { mirrorProfileImages } from "./image-mirror";
 import { getInstagramProvider } from "./instagram-provider";
 import { MAX_RECENT_POSTS } from "./provider-types";
 import type { RawInstagramProfile } from "./provider-types";
@@ -155,10 +156,14 @@ export async function runDiscovery(jobId: string): Promise<ImportJob> {
   try {
     const startedAt = Date.now();
     const provider = getInstagramProvider();
-    const profile = await provider.fetchProfile({
-      url: job.sourceUrl,
-      handle: job.handle ?? "",
-    });
+    // Copy the images now, while their links are alive — they expire in about
+    // five days, and everything below is built from this profile.
+    const profile = await mirrorProfileImages(
+      await provider.fetchProfile({
+        url: job.sourceUrl,
+        handle: job.handle ?? "",
+      }),
+    );
     // Hybrid detection: Keyword Engine → Gemini AI (disabled unless GEMINI_API_KEY
     // is set). Enrichment is computed once and shared as AI context + persistence.
     const detectionInput = toDetectionInput(profile);
@@ -408,10 +413,14 @@ export async function runParse(jobId: string): Promise<{ job: ImportJob; boutiqu
   try {
     const startedAt = Date.now();
     const provider = getInstagramProvider();
-    const profile = await provider.fetchProfile({
-      url: job.sourceUrl,
-      handle: job.handle ?? "",
-    });
+    // Copy the images now, while their links are alive — they expire in about
+    // five days, and everything below is built from this profile.
+    const profile = await mirrorProfileImages(
+      await provider.fetchProfile({
+        url: job.sourceUrl,
+        handle: job.handle ?? "",
+      }),
+    );
     const enrichment = enrichBoutique({
       biography: profile.biography,
       externalUrl: profile.externalUrl,
