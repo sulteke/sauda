@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Send } from "lucide-react";
+import { Loader2, RotateCcw, Send } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { isAlmaty } from "@/lib/location";
 import type { BoutiqueDTO } from "@/types";
 
 /**
@@ -37,6 +38,28 @@ export function SkippedBoutiqueCard({ boutique }: { boutique: BoutiqueDTO }) {
 
   const cityUnknown = !boutique.city;
   const alreadyOverridden = Boolean(boutique.telegramOverrideCity);
+  /**
+   * Skipped back when its city was unknown, and the city has since turned out
+   * to be Almaty. Nothing else on this page can move it: Publish Queue takes
+   * only pending boutiques, and "Publish anyway" is for an UNKNOWN city.
+   */
+  const staleSkip = isAlmaty(boutique.city);
+  const [requeueing, setRequeueing] = useState(false);
+
+  async function requeue() {
+    setRequeueing(true);
+    try {
+      const res = await fetch(`/api/telegram/${boutique.id}/retry`, { method: "POST" });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(json.error ?? "Requeue failed");
+      toast.success(`${boutique.name} moved back to Pending — run Publish Queue to send it`);
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Requeue failed");
+    } finally {
+      setRequeueing(false);
+    }
+  }
 
   async function publishAnyway() {
     setPublishing(true);
@@ -77,6 +100,23 @@ export function SkippedBoutiqueCard({ boutique }: { boutique: BoutiqueDTO }) {
           onClick={() => setOpen(true)}
         >
           Publish anyway
+        </Button>
+      ) : null}
+
+      {staleSkip ? (
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-1 h-7 gap-1 px-2 text-xs"
+          onClick={requeue}
+          disabled={requeueing}
+        >
+          {requeueing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RotateCcw className="h-3.5 w-3.5" />
+          )}
+          Requeue
         </Button>
       ) : null}
 

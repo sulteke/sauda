@@ -610,10 +610,42 @@ describe("retryFailedPublication — a failed post is not final", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
-  it("refuses a SKIPPED boutique — that is a location decision publishWithOverride owns", async () => {
-    findUnique.mockResolvedValue(readyRow({ telegramStatus: "SKIPPED" }));
+  it("keeps a boutique skipped for being in ANOTHER city skipped", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "SKIPPED", city: "Астана" }));
 
-    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_FAILED" });
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_ALMATY" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("keeps a skip whose city is STILL unknown — that is publishWithOverride's call", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "SKIPPED", city: null }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_ALMATY" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * REGRESSION — Almaty boutiques were skipped while their city was unknown.
+   * Once the city was filled in they sat in SKIPPED with no way out: Publish
+   * Queue takes only PENDING, "Publish anyway" appears only for an unknown
+   * city, and this took only FAILED.
+   */
+  it("requeues a STALE skip — skipped while the city was unknown, now Almaty", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "SKIPPED", city: "Алматы" }));
+    update.mockResolvedValue(readyRow({ telegramStatus: "PENDING" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: true, rejection: null });
+    expect(updateData(0).telegramStatus).toBe("PENDING");
+  });
+
+  it("does not requeue a skipped boutique that was nonetheless published", async () => {
+    // Published by hand through the override, then skipped by a later run:
+    // sending it again would post it twice.
+    findUnique.mockResolvedValue(
+      readyRow({ telegramStatus: "SKIPPED", city: "Алматы", telegramPublishedAt: new Date() }),
+    );
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: false, rejection: "NOT_ALMATY" });
     expect(update).not.toHaveBeenCalled();
   });
 

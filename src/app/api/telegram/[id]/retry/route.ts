@@ -13,7 +13,12 @@ const REJECTIONS: Record<string, { status: number; message: string }> = {
   NOT_APPROVED: { status: 409, message: "Only an approved boutique can be published." },
   NOT_FAILED: {
     status: 409,
-    message: "Only a FAILED publication can be retried.",
+    message:
+      "Only a failed publication, or one skipped before its city was known, can be requeued.",
+  },
+  NOT_ALMATY: {
+    status: 409,
+    message: "This boutique was skipped because it is not in Almaty, so it stays skipped.",
   },
 };
 

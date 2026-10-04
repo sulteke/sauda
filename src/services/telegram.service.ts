@@ -263,10 +263,7 @@ async function runPublication(
 
 /** Why a manual publish override was refused. */
 export type PublishOverrideRejection =
-  | "NOT_FOUND"
-  | "NOT_APPROVED"
-  | "CITY_DETECTED"
-  | "DAILY_LIMIT_REACHED";
+  "NOT_FOUND" | "NOT_APPROVED" | "CITY_DETECTED" | "DAILY_LIMIT_REACHED";
 
 export interface PublishOverrideResult {
   ok: boolean;
@@ -296,9 +293,7 @@ export async function publishWithOverride(
   overrideCity: string = ALMATY,
 ): Promise<PublishOverrideResult> {
   const limit = dailyTelegramPublishLimit();
-  const reject = async (
-    rejection: PublishOverrideRejection,
-  ): Promise<PublishOverrideResult> => ({
+  const reject = async (rejection: PublishOverrideRejection): Promise<PublishOverrideResult> => ({
     ok: false,
     rejection,
     status: null,
@@ -342,8 +337,13 @@ export async function publishWithOverride(
   };
 }
 
-/** Why requeueing a failed publication was refused. */
-export type RetryPublicationRejection = "NOT_FOUND" | "NOT_APPROVED" | "NOT_FAILED";
+/** Why requeueing a publication was refused. */
+export type RetryPublicationRejection =
+  | "NOT_FOUND"
+  | "NOT_APPROVED"
+  | "NOT_FAILED"
+  /** Skipped, and still not in the channel's city: that decision stands. */
+  | "NOT_ALMATY";
 
 export interface RetryPublicationResult {
   ok: boolean;
@@ -351,8 +351,8 @@ export interface RetryPublicationResult {
 }
 
 /**
- * Puts a FAILED publication back in the pending column so Publish Queue can try
- * it again.
+ * Puts a FAILED publication — or a stale SKIPPED one — back in the pending
+ * column so Publish Queue can try it again.
  *
  * Until this existed a failed publication was final: nothing in the app moved a
  * boutique out of FAILED, so an outage, a missing token or a transient Telegram
@@ -365,15 +365,30 @@ export interface RetryPublicationResult {
  * daily limit and the channel's pacing are enforced; retrying does not post
  * anything by itself and cannot be used to slip past either.
  */
-export async function retryFailedPublication(
-  boutiqueId: string,
-): Promise<RetryPublicationResult> {
+export async function retryFailedPublication(boutiqueId: string): Promise<RetryPublicationResult> {
   const existing = await prisma.boutique.findUnique({ where: { id: boutiqueId } });
   if (!existing) return { ok: false, rejection: "NOT_FOUND" };
   if (existing.status !== "APPROVED") return { ok: false, rejection: "NOT_APPROVED" };
-  // Deliberately narrow: PUBLISHED must not be re-sent to subscribers from
-  // here, and SKIPPED is a location decision that publishWithOverride owns.
-  if (existing.telegramStatus !== "FAILED") return { ok: false, rejection: "NOT_FAILED" };
+  /**
+   * A SKIPPED boutique comes back only when the skip has gone stale.
+   *
+   * The publisher skips a boutique whose city it cannot place, and for a long
+   * time the city column was empty for almost everything — so Almaty stores
+   * were skipped for want of data, not for being elsewhere. Once their city was
+   * filled in they sat in SKIPPED with nothing able to move them: Publish Queue
+   * takes only PENDING, "Publish anyway" appears only while the city is
+   * unknown, and this function took only FAILED. A skip whose city is now
+   * Almaty, on a boutique never published, is such a stale one. A boutique
+   * skipped because it really is in another city stays skipped.
+   */
+  if (existing.telegramStatus === "SKIPPED") {
+    const staleSkip = canonicalKzCity(existing.city) === ALMATY && !existing.telegramPublishedAt;
+    if (!staleSkip) return { ok: false, rejection: "NOT_ALMATY" };
+  } else if (existing.telegramStatus !== "FAILED") {
+    // PUBLISHED must never be re-sent to subscribers from here; PENDING is
+    // already where this would put it.
+    return { ok: false, rejection: "NOT_FAILED" };
+  }
 
   await prisma.boutique.update({
     where: { id: boutiqueId },
@@ -385,6 +400,7 @@ export async function retryFailedPublication(
   });
   logger.info("publication.retry_requeued", {
     boutiqueId,
+    from: existing.telegramStatus,
     previousError: existing.telegramError,
   });
 

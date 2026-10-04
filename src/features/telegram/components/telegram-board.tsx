@@ -34,15 +34,7 @@ function ColumnShell({
   );
 }
 
-function Column({
-  title,
-  icon,
-  items,
-}: {
-  title: string;
-  icon: LucideIcon;
-  items: BoutiqueDTO[];
-}) {
+function Column({ title, icon, items }: { title: string; icon: LucideIcon; items: BoutiqueDTO[] }) {
   return (
     <ColumnShell title={title} icon={icon} count={items.length}>
       {items.length === 0 ? (
@@ -69,10 +61,17 @@ function Column({
   );
 }
 
-/** Skipped column — shows the detected city, and offers the Unknown-only override. */
+/**
+ * Skipped column — shows the detected city, with the Unknown-only override and
+ * a Requeue for boutiques whose city turned out to be Almaty after the skip.
+ *
+ * Titled plainly "Skipped": it holds boutiques skipped for being elsewhere AND
+ * Almaty ones skipped back when their city was unknown, so "not Almaty" was
+ * wrong for part of what it listed.
+ */
 function SkippedColumn({ items }: { items: BoutiqueDTO[] }) {
   return (
-    <ColumnShell title="Skipped (not Almaty)" icon={SkipForward} count={items.length}>
+    <ColumnShell title="Skipped" icon={SkipForward} count={items.length}>
       {items.length === 0 ? (
         <p className="text-sm text-muted-foreground">None.</p>
       ) : (
