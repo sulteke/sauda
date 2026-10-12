@@ -4,6 +4,8 @@
  * without a browser.
  */
 
+import { isImageFault } from "@/lib/instagram-image";
+
 /**
  * Failures in a row after which the run stops by itself.
  *
@@ -20,6 +22,8 @@ export interface PublishRunTally {
   failed: number;
   /** Not a failure: the publisher decided the boutique is not for this channel. */
   skipped: number;
+  /** Failed because of the boutique's stored images (expired or unreachable) — counted in `failed` too. */
+  deadImages: number;
   consecutiveFailures: number;
 }
 
@@ -27,6 +31,7 @@ export const EMPTY_TALLY: PublishRunTally = {
   published: 0,
   failed: 0,
   skipped: 0,
+  deadImages: 0,
   consecutiveFailures: 0,
 };
 
@@ -36,11 +41,26 @@ export const EMPTY_TALLY: PublishRunTally = {
  * Counts by OUTCOME. Counting every processed boutique as published told the
  * operator "Published 19" for a run in which all nineteen had failed.
  */
-export function tallyResult(tally: PublishRunTally, status: string | null): PublishRunTally {
+export function tallyResult(
+  tally: PublishRunTally,
+  status: string | null,
+  errorCode: string | null = null,
+): PublishRunTally {
   switch (status) {
     case "PUBLISHED":
       return { ...tally, published: tally.published + 1, consecutiveFailures: 0 };
     case "FAILED":
+      /**
+       * Dead images — expired, or on hosts Telegram cannot reach — are a fault
+       * of that one boutique, found before anything was sent — not a sign the
+       * channel is failing. Counting them stopped a
+       * run after three retried boutiques with dead links, and nine boutiques
+       * with live images behind them were never reached. So they neither count
+       * toward the stop nor break a streak of real failures.
+       */
+      if (isImageFault(errorCode)) {
+        return { ...tally, failed: tally.failed + 1, deadImages: tally.deadImages + 1 };
+      }
       return {
         ...tally,
         failed: tally.failed + 1,
@@ -63,7 +83,13 @@ export function shouldStopForFailures(tally: PublishRunTally): boolean {
 /** One line for the toast, naming every outcome that happened. */
 export function describeTally(tally: PublishRunTally): string {
   const parts = [`Published: ${tally.published}`];
-  if (tally.failed > 0) parts.push(`Failed: ${tally.failed}`);
+  if (tally.failed > 0) {
+    parts.push(
+      tally.deadImages > 0
+        ? `Failed: ${tally.failed} (${tally.deadImages} with dead images — re-parse them)`
+        : `Failed: ${tally.failed}`,
+    );
+  }
   if (tally.skipped > 0) parts.push(`Skipped: ${tally.skipped}`);
   return parts.join(" · ");
 }

@@ -14,6 +14,8 @@ export interface PublicationOutcome {
   httpStatus?: number | null;
   /** Complete raw API response body, when available. */
   response?: string | null;
+  /** The failure's known cause, when the target named one (see PublicationError). */
+  code?: string | null;
 }
 
 /**
@@ -58,6 +60,7 @@ export async function publishToTargets(
       if (error instanceof PublicationError) {
         outcome.httpStatus = error.httpStatus;
         outcome.response = error.response;
+        outcome.code = error.code;
       }
       outcomes.push(outcome);
     }

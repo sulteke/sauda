@@ -40,6 +40,8 @@ export interface TelegramFailureDetail {
   response: string | null;
   /** ISO timestamp of the failure. */
   failedAt: string;
+  /** The failure's known cause, e.g. IMAGES_EXPIRED or IMAGES_UNREACHABLE. */
+  code?: string | null;
 }
 
 /**

@@ -34,6 +34,8 @@ interface ProcessResult {
   remaining: number;
   status: string | null;
   error: string | null;
+  /** The failure's known cause, e.g. IMAGES_EXPIRED. */
+  errorCode?: string | null;
   /** Today's publication allowance is spent — stop and resume tomorrow. */
   dailyLimitReached?: boolean;
   publishedToday?: number;
@@ -74,7 +76,7 @@ export function PublishQueueButton({ pending }: { pending: number }) {
       while (keepGoing) {
         const result = await publishNext();
         if (result.processed) {
-          current = tallyResult(current, result.status);
+          current = tallyResult(current, result.status, result.errorCode ?? null);
           setTally(current);
           if (result.status === "FAILED") lastError = result.error;
         }

@@ -20,6 +20,11 @@ const REJECTIONS: Record<string, { status: number; message: string }> = {
     status: 409,
     message: "This boutique was skipped because it is not in Almaty, so it stays skipped.",
   },
+  IMAGES_EXPIRED: {
+    status: 409,
+    message:
+      "Every Instagram image link of this boutique has expired, so a retry would fail again. Use Re-parse to fetch fresh ones.",
+  },
 };
 
 /**

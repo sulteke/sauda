@@ -75,5 +75,6 @@ export function parseTelegramFailure(
     message: v.message,
     response: typeof v.response === "string" ? v.response : null,
     failedAt: typeof v.failedAt === "string" ? v.failedAt : "",
+    code: typeof v.code === "string" ? v.code : null,
   };
 }

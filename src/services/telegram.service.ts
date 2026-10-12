@@ -7,6 +7,7 @@ import { sanitizeHashtags } from "@/config/telegram-hashtags";
 import { startOfBusinessDay } from "@/lib/business-day";
 import { categoryLabel } from "@/lib/category-engine";
 import { completeHashtags } from "@/lib/hashtag-derivation";
+import { allImagesExpired } from "@/lib/instagram-image";
 import { ALMATY, canonicalKzCity } from "@/lib/location";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -17,6 +18,7 @@ import {
 } from "@/server/publishing/publication-engine";
 import type { PublishableBoutique } from "@/server/publishing/publication-target";
 import { getTelegramTargets } from "@/server/publishing/telegram-target";
+import { parseInstagramProfile } from "@/services/import.service";
 import type { BoutiquePost } from "@/types";
 
 // Re-exported for backward compatibility — the Telegram-specific formatting now
@@ -29,6 +31,8 @@ export interface TelegramProcessResult {
   boutiqueId: string | null;
   status: "PUBLISHED" | "SKIPPED" | "FAILED" | null;
   error: string | null;
+  /** The failure's known cause, e.g. IMAGES_EXPIRED — a fault of this boutique, not the channel. */
+  errorCode?: string | null;
   remaining: number;
   /**
    * True when the business day's publication allowance is used up. The item was
@@ -99,6 +103,7 @@ async function recordOutcome(
         message: failure.error ?? "",
         response: failure.response ?? null,
         failedAt: new Date().toISOString(),
+        code: failure.code ?? null,
       }
     : Prisma.DbNull;
 
@@ -112,6 +117,11 @@ async function recordOutcome(
       ...(reduced.status === "PUBLISHED" ? { telegramPublishedAt: new Date() } : {}),
     },
   });
+}
+
+/** The stored posts column, which Prisma hands back as untyped JSON. */
+function storedPosts(posts: unknown): BoutiquePost[] {
+  return Array.isArray(posts) ? (posts as unknown as BoutiquePost[]) : [];
 }
 
 /** Stored boutique → the destination-agnostic snapshot targets consume. */
@@ -131,7 +141,7 @@ function toPublishable(boutique: {
   avatarUrl: string | null;
   posts: unknown;
 }): PublishableBoutique {
-  const posts = Array.isArray(boutique.posts) ? (boutique.posts as unknown as BoutiquePost[]) : [];
+  const posts = storedPosts(boutique.posts);
   // Final detected categories (auto + manual corrections), highest-scoring first.
   // productCategories is stored in merge order; resolve ids → labels preserving it.
   const categories = boutique.productCategories
@@ -231,6 +241,7 @@ export async function processNextTelegramPost(): Promise<TelegramProcessResult> 
     boutiqueId: next.id,
     status: reduced.status,
     error: reduced.failure?.error ?? null,
+    errorCode: reduced.failure?.code ?? null,
     remaining: await countPendingPublish(),
     publishedToday: await countPublishedToday(),
   };
@@ -343,7 +354,9 @@ export type RetryPublicationRejection =
   | "NOT_APPROVED"
   | "NOT_FAILED"
   /** Skipped, and still not in the channel's city: that decision stands. */
-  | "NOT_ALMATY";
+  | "NOT_ALMATY"
+  /** Every image link has expired; requeueing would fail the same way. Re-parse instead. */
+  | "IMAGES_EXPIRED";
 
 export interface RetryPublicationResult {
   ok: boolean;
@@ -390,6 +403,18 @@ export async function retryFailedPublication(boutiqueId: string): Promise<RetryP
     return { ok: false, rejection: "NOT_FAILED" };
   }
 
+  // Requeueing a FAILED post sends the same stored links. Once all of them have
+  // expired that can only fail again — six boutiques were retried into exactly
+  // that, and their failures stopped the run before the live ones behind them
+  // were sent. A stale SKIP is still requeued: there is no Re-parse on the
+  // Skipped column, and the failure it meets lands it in FAILED, where there is.
+  if (
+    existing.telegramStatus === "FAILED" &&
+    allImagesExpired(existing.avatarUrl, storedPosts(existing.posts))
+  ) {
+    return { ok: false, rejection: "IMAGES_EXPIRED" };
+  }
+
   await prisma.boutique.update({
     where: { id: boutiqueId },
     data: {
@@ -401,6 +426,69 @@ export async function retryFailedPublication(boutiqueId: string): Promise<RetryP
   logger.info("publication.retry_requeued", {
     boutiqueId,
     from: existing.telegramStatus,
+    previousError: existing.telegramError,
+  });
+
+  return { ok: true, rejection: null };
+}
+
+/** Why refreshing a failed publication's images was refused. */
+export type RefreshImagesRejection =
+  | "NOT_FOUND"
+  | "NOT_APPROVED"
+  | "NOT_FAILED"
+  | "NO_INSTAGRAM"
+  /** The scrape landed on a different boutique — the profile was renamed or moved. */
+  | "DIFFERENT_PROFILE"
+  /** Scraped again, and there is still no live image to send. */
+  | "STILL_EXPIRED";
+
+export interface RefreshImagesResult {
+  ok: boolean;
+  rejection: RefreshImagesRejection | null;
+}
+
+/**
+ * Re-parses a boutique whose publication failed, to replace its image links,
+ * then puts it back in the pending column.
+ *
+ * Stored Instagram links die a few days after the scrape, and Retry sends the
+ * same ones again; only a fresh scrape brings live links. The parse keeps what
+ * the boutique already has — its approval, city and AI categories — and
+ * refreshes the profile fields, the images among them.
+ *
+ * It costs one Apify run, and, like Retry, it only REQUEUES: Publish Queue
+ * still does the posting, under the daily limit.
+ */
+export async function refreshPublicationImages(boutiqueId: string): Promise<RefreshImagesResult> {
+  const existing = await prisma.boutique.findUnique({ where: { id: boutiqueId } });
+  if (!existing) return { ok: false, rejection: "NOT_FOUND" };
+  if (existing.status !== "APPROVED") return { ok: false, rejection: "NOT_APPROVED" };
+  if (existing.telegramStatus !== "FAILED") return { ok: false, rejection: "NOT_FAILED" };
+  if (!existing.instagramUrl) return { ok: false, rejection: "NO_INSTAGRAM" };
+
+  // Throws when the scrape itself fails; the caller reports that as it is.
+  const { boutiqueId: parsedId } = await parseInstagramProfile({ url: existing.instagramUrl });
+  if (parsedId !== boutiqueId) {
+    logger.warn("publication.refresh_different_profile", { boutiqueId, parsedId });
+    return { ok: false, rejection: "DIFFERENT_PROFILE" };
+  }
+
+  const refreshed = await prisma.boutique.findUnique({ where: { id: boutiqueId } });
+  if (!refreshed || allImagesExpired(refreshed.avatarUrl, storedPosts(refreshed.posts))) {
+    return { ok: false, rejection: "STILL_EXPIRED" };
+  }
+
+  await prisma.boutique.update({
+    where: { id: boutiqueId },
+    data: {
+      telegramStatus: "PENDING",
+      telegramError: null,
+      telegramFailure: Prisma.DbNull,
+    },
+  });
+  logger.info("publication.images_refreshed", {
+    boutiqueId,
     previousError: existing.telegramError,
   });
 

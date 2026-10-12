@@ -13,14 +13,33 @@ vi.mock("@/lib/prisma", () => ({
   prisma: { boutique: { findFirst, findUnique, update, count } },
 }));
 
+const { parseInstagramProfile } = vi.hoisted(() => ({ parseInstagramProfile: vi.fn() }));
+vi.mock("@/services/import.service", () => ({ parseInstagramProfile }));
+
 import {
   buildCaption,
   processNextTelegramPost,
   publishWithOverride,
   type PublishableBoutique,
+  refreshPublicationImages,
   retryFailedPublication,
   toHashtag,
 } from "./telegram.service";
+
+/** Instagram CDN links, signed to expire well in the past or well in the future. */
+const DAY = 24 * 3600 * 1000;
+const igLink = (offsetMs: number, name: string) =>
+  `https://scontent.cdninstagram.com/v/${name}.jpg?oe=${Math.floor(
+    (Date.now() + offsetMs) / 1000,
+  ).toString(16)}`;
+const deadImages = {
+  avatarUrl: igLink(-3 * DAY, "a"),
+  posts: [{ imageUrl: igLink(-3 * DAY, "p1"), caption: null }],
+};
+const liveImages = {
+  avatarUrl: igLink(4 * DAY, "a"),
+  posts: [{ imageUrl: igLink(4 * DAY, "p1"), caption: null }],
+};
 
 const boutique = (over: Partial<PublishableBoutique> = {}): PublishableBoutique => ({
   id: "b1",
@@ -660,6 +679,153 @@ describe("retryFailedPublication — a failed post is not final", () => {
     findUnique.mockResolvedValue(null);
 
     expect(await retryFailedPublication("nope")).toEqual({ ok: false, rejection: "NOT_FOUND" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * REGRESSION — six boutiques whose image links had all expired were retried
+   * into the queue, failed again for the same links, and their failures
+   * stopped the run before nine live boutiques behind them were sent.
+   */
+  it("refuses a boutique whose every image link has expired — it would fail the same way", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "FAILED", ...deadImages }));
+
+    expect(await retryFailedPublication("b1")).toEqual({
+      ok: false,
+      rejection: "IMAGES_EXPIRED",
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  /**
+   * REGRESSION — the expired-links guard also caught stale skips, and the
+   * Skipped column has no Re-parse: such a boutique could not be moved at all.
+   * Requeued, it fails into FAILED, where Re-parse is offered.
+   */
+  it("still requeues a stale SKIP whose links have expired — there is no Re-parse there", async () => {
+    findUnique.mockResolvedValue(
+      readyRow({ telegramStatus: "SKIPPED", city: "Алматы", ...deadImages }),
+    );
+    update.mockResolvedValue(readyRow({ telegramStatus: "PENDING" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: true, rejection: null });
+    expect(updateData(0).telegramStatus).toBe("PENDING");
+  });
+
+  it("requeues a boutique whose images are still live", async () => {
+    findUnique.mockResolvedValue(readyRow({ telegramStatus: "FAILED", ...liveImages }));
+    update.mockResolvedValue(readyRow({ telegramStatus: "PENDING" }));
+
+    expect(await retryFailedPublication("b1")).toEqual({ ok: true, rejection: null });
+  });
+});
+
+describe("processNextTelegramPost — expired images", () => {
+  const env = { ...process.env };
+
+  beforeEach(() => {
+    findFirst.mockReset();
+    update.mockReset();
+    count.mockReset();
+    count.mockResolvedValue(0);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    process.env = { ...env };
+  });
+
+  it("fails without calling Telegram, and names the cause so the run keeps going", async () => {
+    const fetchMock = stubTelegramOk();
+    findFirst.mockResolvedValue(readyRow(deadImages));
+
+    const result = await processNextTelegramPost();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.status).toBe("FAILED");
+    expect(result.errorCode).toBe("IMAGES_EXPIRED");
+    expect(updateData(0).telegramStatus).toBe("FAILED");
+    // Stored with the failure, so the card can offer Re-parse after a reload.
+    expect((updateData(0).telegramFailure as { code: string }).code).toBe("IMAGES_EXPIRED");
+  });
+});
+
+describe("refreshPublicationImages — fresh links for a failed post", () => {
+  beforeEach(() => {
+    findUnique.mockReset();
+    update.mockReset();
+    parseInstagramProfile.mockReset();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  const failed = (over: Record<string, unknown> = {}) =>
+    readyRow({
+      telegramStatus: "FAILED",
+      instagramUrl: "https://www.instagram.com/shop",
+      ...deadImages,
+      ...over,
+    });
+
+  it("re-parses the profile, then moves the boutique back to PENDING", async () => {
+    findUnique.mockResolvedValueOnce(failed()).mockResolvedValueOnce(failed(liveImages));
+    parseInstagramProfile.mockResolvedValue({ job: {}, boutiqueId: "b1" });
+
+    expect(await refreshPublicationImages("b1")).toEqual({ ok: true, rejection: null });
+    expect(parseInstagramProfile).toHaveBeenCalledWith({ url: "https://www.instagram.com/shop" });
+    expect(updateData(0)).toMatchObject({ telegramStatus: "PENDING", telegramError: null });
+    // Requeued only: nothing was posted, so nothing may claim a publication.
+    expect(updateData(0).telegramPublishedAt).toBeUndefined();
+  });
+
+  it("leaves it FAILED when the fresh scrape still has no live image", async () => {
+    findUnique.mockResolvedValueOnce(failed()).mockResolvedValueOnce(failed());
+    parseInstagramProfile.mockResolvedValue({ job: {}, boutiqueId: "b1" });
+
+    expect(await refreshPublicationImages("b1")).toEqual({
+      ok: false,
+      rejection: "STILL_EXPIRED",
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("stops when the link now leads to a different boutique", async () => {
+    findUnique.mockResolvedValueOnce(failed());
+    parseInstagramProfile.mockResolvedValue({ job: {}, boutiqueId: "someone-else" });
+
+    expect(await refreshPublicationImages("b1")).toEqual({
+      ok: false,
+      rejection: "DIFFERENT_PROFILE",
+    });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("spends no scrape on a boutique that has not failed", async () => {
+    findUnique.mockResolvedValue(failed({ telegramStatus: "PUBLISHED" }));
+
+    expect(await refreshPublicationImages("b1")).toEqual({ ok: false, rejection: "NOT_FAILED" });
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+  });
+
+  it("spends no scrape on a boutique without an Instagram link", async () => {
+    findUnique.mockResolvedValue(failed({ instagramUrl: null }));
+
+    expect(await refreshPublicationImages("b1")).toEqual({
+      ok: false,
+      rejection: "NO_INSTAGRAM",
+    });
+    expect(parseInstagramProfile).not.toHaveBeenCalled();
+  });
+
+  it("lets a failed scrape surface as an error", async () => {
+    findUnique.mockResolvedValue(failed());
+    parseInstagramProfile.mockRejectedValue(new Error("Apify run failed"));
+
+    await expect(refreshPublicationImages("b1")).rejects.toThrow("Apify run failed");
     expect(update).not.toHaveBeenCalled();
   });
 });

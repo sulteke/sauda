@@ -48,15 +48,26 @@ export interface PublishableBoutique {
 export class PublicationError extends Error {
   readonly httpStatus: number | null;
   readonly response: string | null;
+  /**
+   * A known cause, when the target can name one — e.g. IMAGES_EXPIRED, a fault
+   * of this boutique's data rather than of the destination.
+   */
+  readonly code: string | null;
 
   constructor(
     message: string,
-    options: { httpStatus?: number | null; response?: string | null; cause?: unknown } = {},
+    options: {
+      httpStatus?: number | null;
+      response?: string | null;
+      code?: string | null;
+      cause?: unknown;
+    } = {},
   ) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "PublicationError";
     this.httpStatus = options.httpStatus ?? null;
     this.response = options.response ?? null;
+    this.code = options.code ?? null;
   }
 }
 

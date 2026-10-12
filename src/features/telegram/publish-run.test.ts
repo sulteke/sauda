@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { IMAGES_EXPIRED, IMAGES_UNREACHABLE } from "@/lib/instagram-image";
+
 import {
   describeTally,
   EMPTY_TALLY,
@@ -59,6 +61,49 @@ describe("shouldStopForFailures", () => {
     const t = run("FAILED", "FAILED", "SKIPPED");
     expect(t.consecutiveFailures).toBe(2);
     expect(shouldStopForFailures(tallyResult(t, "FAILED"))).toBe(true);
+  });
+});
+
+describe("dead images — a fault of one boutique, not of the channel", () => {
+  const expired = (t: PublishRunTally) => tallyResult(t, "FAILED", IMAGES_EXPIRED);
+
+  /**
+   * REGRESSION — three retried boutiques whose links had all expired stopped
+   * the run, and the nine boutiques with live images queued behind them were
+   * never sent.
+   */
+  it("does not stop the run, however many there are", () => {
+    const t = [1, 2, 3, 4, 5].reduce<PublishRunTally>((acc) => expired(acc), EMPTY_TALLY);
+    expect(t.consecutiveFailures).toBe(0);
+    expect(shouldStopForFailures(t)).toBe(false);
+  });
+
+  it("still counts them as failed, and separately", () => {
+    const t = expired(expired(EMPTY_TALLY));
+    expect(t.failed).toBe(2);
+    expect(t.deadImages).toBe(2);
+  });
+
+  it("does not hide a streak of REAL failures around them", () => {
+    const t = expired(run("FAILED", "FAILED"));
+    expect(t.consecutiveFailures).toBe(2);
+    expect(shouldStopForFailures(tallyResult(t, "FAILED"))).toBe(true);
+  });
+
+  it("treats links Telegram cannot reach the same way as expired ones", () => {
+    const t = tallyResult(
+      tallyResult(EMPTY_TALLY, "FAILED", IMAGES_UNREACHABLE),
+      "FAILED",
+      IMAGES_UNREACHABLE,
+    );
+    expect(t.consecutiveFailures).toBe(0);
+    expect(t.deadImages).toBe(2);
+  });
+
+  it("tells the operator what to do about them", () => {
+    expect(describeTally(expired(run("PUBLISHED")))).toBe(
+      "Published: 1 · Failed: 1 (1 with dead images — re-parse them)",
+    );
   });
 });
 
