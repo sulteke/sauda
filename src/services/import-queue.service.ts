@@ -794,6 +794,13 @@ async function runAnalyzeBatchStage(
       const soonest = error.usage
         .filter((u) => !u.available && u.used < u.limit && u.cooldownUntil !== null)
         .map((u) => u.cooldownUntil!.getTime());
+      // Hand the claim back. The rows were marked ANALYZING above, and left
+      // there "Analyze only" no longer sees them — it reports nothing to do and
+      // stops, stranding them until the stale-job sweep ten minutes later.
+      await prisma.importQueue.updateMany({
+        where: { id: { in: queueIds }, status: "ANALYZING" },
+        data: { status: "PENDING_ANALYSIS" },
+      });
       const remaining = await countRemaining();
       logger.info(soonest.length > 0 ? "queue.cooling_down" : "queue.daily_limit_reached", {
         stage: "analyze",
@@ -801,7 +808,7 @@ async function runAnalyzeBatchStage(
         error: message,
         remaining,
       });
-      // Untouched: still PENDING_ANALYSIS, nothing stamped, nothing to undo.
+      // Back in PENDING_ANALYSIS, and nothing stamped on the jobs.
       return {
         processed: done.length > 0,
         item: done[0] ?? null,

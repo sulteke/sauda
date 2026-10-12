@@ -1240,6 +1240,13 @@ describe("analysis during a cooldown — wait, do not fail", () => {
       expect.objectContaining({ data: expect.objectContaining({ status: "ANALYSIS_FAILED" }) }),
     );
     expect(markAnalysisJobFailed).not.toHaveBeenCalled();
+    // REGRESSION — the rows were claimed as ANALYZING before the call and left
+    // there, where "Analyze only" no longer sees them: it reported nothing to
+    // analyze and stopped with six shops stranded mid-analysis.
+    expect(updateMany).toHaveBeenLastCalledWith({
+      where: { id: { in: ["a1"] }, status: "ANALYZING" },
+      data: { status: "PENDING_ANALYSIS" },
+    });
     // The loop is told when to come back.
     expect(result.retryAfter).toBeTruthy();
     expect(result.dailyLimitReached).toBeUndefined();
