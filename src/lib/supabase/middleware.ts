@@ -3,7 +3,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 /** Public routes reachable without an authenticated session (the marketplace + login). */
 const PUBLIC_EXACT = new Set(["/", "/login", "/robots.txt", "/sitemap.xml"]);
-const PUBLIC_PREFIXES = ["/search", "/categories", "/boutique"];
+// The Telegram webhook has no user session; it authenticates with its own secret.
+const PUBLIC_PREFIXES = ["/search", "/categories", "/boutique", "/api/telegram/bot"];
 
 function isPublicRoute(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;
