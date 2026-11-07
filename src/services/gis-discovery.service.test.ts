@@ -283,6 +283,22 @@ describe("deduplication", () => {
     await runGisDiscovery(APORT_WEST);
     expect((storeUpsert.mock.calls[0]?.[0] as { where: unknown }).where).toEqual({ gisId: "g1" });
   });
+
+  it("a re-run that misses the Instagram keeps the handle an earlier run found", async () => {
+    fetchStores.mockResolvedValue([store()]);
+    await runGisDiscovery(APORT_WEST);
+    const args = storeUpsert.mock.calls[0]?.[0] as { update: Record<string, unknown> };
+    expect(args.update).not.toHaveProperty("instagramHandle");
+    expect(args.update).not.toHaveProperty("instagramUrl");
+    expect(args.update).not.toHaveProperty("status");
+  });
+
+  it("a re-run that finds the Instagram still refreshes it", async () => {
+    fetchStores.mockResolvedValue([withIg("zara_kz")]);
+    await runGisDiscovery(APORT_WEST);
+    const args = storeUpsert.mock.calls[0]?.[0] as { update: Record<string, unknown> };
+    expect(args.update).toMatchObject({ instagramHandle: "zara_kz", status: "INSTAGRAM_FOUND" });
+  });
 });
 
 describe("rubric filtering keeps non-fashion out of the pipeline", () => {

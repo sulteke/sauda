@@ -252,9 +252,12 @@ export async function runGisDiscovery(
         locationName: location.name ?? null,
         gisUrl: store.gisUrl ?? null,
         source,
-        status,
-        instagramHandle: handle,
-        instagramUrl: store.instagramUrl ?? null,
+        // A run that misses the Instagram contact (the scraper is flaky about
+        // contacts) must not erase a handle an earlier run resolved: that would
+        // unlink the boutique from this venue in boutique_locations.
+        ...(handle
+          ? { status, instagramHandle: handle, instagramUrl: store.instagramUrl ?? null }
+          : {}),
         ...(candidateId ? { candidateId } : {}),
       },
       create: {
